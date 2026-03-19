@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# PyInstaller
+*.manifest
+
+# Logs (chứa thông tin máy cụ thể)
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Sensitive - KHÔNG commit API keys
+.env
+
+# Debug/temp files
+_debug_*
+_raw_output*
+*_new.py

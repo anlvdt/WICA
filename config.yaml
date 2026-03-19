@@ -1,0 +1,151 @@
+# AntiGravity Agent Configuration
+
+# === LLM Providers (thứ tự ưu tiên) ===
+# USB portable: ưu tiên cloud API miễn phí (không cần cài gì trên máy đích)
+# Chỉ cần internet là đủ.
+
+llm_providers:
+  # 1. Groq - miễn phí, cực nhanh, KHÔNG cần cài gì
+  #    Lấy API key tại: https://console.groq.com/keys
+  - name: "groq"
+    base_url: "https://api.groq.com/openai/v1"
+    api_key: "env:GROQ_API_KEY"  # ← Đặt biến môi trường GROQ_API_KEY hoặc điền trực tiếp
+    model: "llama-3.1-8b-instant"
+
+  # 2. NVIDIA NIM - miễn phí 1000 req/ngày, KHÔNG cần cài gì
+  #    Lấy API key tại: https://build.nvidia.com/
+  - name: "nvidia"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key: "env:NVIDIA_API_KEY"  # ← Đặt biến môi trường NVIDIA_API_KEY hoặc điền trực tiếp
+    model: "meta/llama-3.1-8b-instruct"
+
+  # 3. Ollama - offline, cần cài Ollama + pull model trên máy đích
+  - name: "ollama"
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    model: "llama3.1:8b"
+
+# Software aliases - ánh xạ tên phổ biến sang winget package ID
+aliases:
+  # --- Phan mem thuong dung ---
+  unikey: "UniKey.UniKey"
+  ultraviewer: "DucFabulous.UltraViewer"
+  chrome: "Google.Chrome"
+  "google chrome": "Google.Chrome"
+  firefox: "Mozilla.Firefox"
+  vscode: "Microsoft.VisualStudio.Code"
+  7zip: "7zip.7zip"
+  notepad++: "Notepad++.Notepad++"
+  vlc: "VideoLAN.VLC"
+  winrar: "RARLab.WinRAR"
+  teamviewer: "TeamViewer.TeamViewer"
+  anydesk: "AnyDesk.AnyDesk"
+  zoom: "Zoom.Zoom"
+  telegram: "Telegram.TelegramDesktop"
+  zalo: "VNG.Zalo"
+  office: "Microsoft.Office"
+  python: "Python.Python.3.12"
+  nodejs: "OpenJS.NodeJS"
+  git: "Git.Git"
+  putty: "PuTTY.PuTTY"
+  winscp: "WinSCP.WinSCP"
+  filezilla: "TimKosse.FileZilla.Client"
+  ccleaner: "Piriform.CCleaner"
+  malwarebytes: "Malwarebytes.Malwarebytes"
+  sharex: "ShareX.ShareX"
+  everything: "voidtools.Everything"
+  powertoys: "Microsoft.PowerToys"
+  obs: "OBSProject.OBSStudio"
+  gimp: "GIMP.GIMP"
+  libreoffice: "TheDocumentFoundation.LibreOffice"
+  # --- App trong profile mac_dinh ---
+  acrobat: "Adobe.Acrobat.Reader.64-bit"
+  "acrobat reader": "Adobe.Acrobat.Reader.64-bit"
+  "adobe reader": "Adobe.Acrobat.Reader.64-bit"
+  "pdf reader": "Adobe.Acrobat.Reader.64-bit"
+  "vc++ x64": "Microsoft.VCRedist.2015+.x64"
+  "vcredist x64": "Microsoft.VCRedist.2015+.x64"
+  "vc++ x86": "Microsoft.VCRedist.2015+.x86"
+  "vcredist x86": "Microsoft.VCRedist.2015+.x86"
+  "vcredist": "Microsoft.VCRedist.2015+.x64"
+  citrix: "Citrix.Workspace"
+  "citrix workspace": "Citrix.Workspace"
+  connecttunnel: "SonicWall.ConnectTunnel"
+  "sonicwall vpn": "SonicWall.ConnectTunnel"
+  "vpn sonicwall": "SonicWall.ConnectTunnel"
+  "office 365": "Microsoft.Office"
+  "office365": "Microsoft.Office"
+  "microsoft 365": "Microsoft.Office"
+  "m365": "Microsoft.Office"
+
+# Thư mục chứa file cài đặt local (thử lần lượt, dùng cái nào tồn tại)
+local_paths:
+  - "C:\\Ecom Softs"
+  - "C:\\Temp\\SoftVN"
+  - "C:\\SoftVN"
+  - "C:\\Software"
+
+# Bloatware cần gỡ (winget ID) - system-wide
+# Giữ lại: Photos, Snipping Tool, Calculator, Notepad, Paint, Terminal,
+#           Store, Camera, Clock, Sound Recorder, Sticky Notes, OneNote,
+#           Office Hub, Outlook, Teams, Your Phone, To Do
+bloatware:
+  - "Clipchamp.Clipchamp"
+  - "Microsoft.BingNews"
+  - "Microsoft.BingWeather"
+  - "Microsoft.GetHelp"
+  - "Microsoft.Getstarted"
+  - "Microsoft.MicrosoftSolitaireCollection"
+  - "Microsoft.PowerAutomateDesktop"
+  - "Microsoft.WindowsFeedbackHub"
+  - "Microsoft.WindowsMaps"
+  - "Microsoft.Xbox.TCUI"
+  - "Microsoft.XboxGameOverlay"
+  - "Microsoft.XboxGamingOverlay"
+  - "Microsoft.XboxIdentityProvider"
+  - "Microsoft.XboxSpeechToTextOverlay"
+  - "Microsoft.ZuneMusic"
+  - "Microsoft.ZuneVideo"
+  - "Microsoft.549981C3F5F10"
+  - "MicrosoftCorporationII.QuickAssist"
+  - "Microsoft.SkypeApp"
+  - "Disney.37853FC22B2CE"
+  - "SpotifyAB.SpotifyMusic"
+  - "Microsoft.GamingApp"
+  - "Microsoft.MixedReality.Portal"
+  - "Microsoft.3DBuilder"
+  - "Microsoft.Microsoft3DViewer"
+
+# === Profiles - Hồ sơ cài đặt nhanh ===
+# Mỗi profile chứa danh sách actions sẽ chạy tuần tự.
+# Gõ "chạy profile <tên>" để thực hiện.
+# Tự thêm/sửa profile theo nhu cầu.
+
+profiles:
+  mac_dinh:
+    name: "Cài đặt máy mới"
+    actions:
+      # --- Tắt UAC trước (tránh popup mỗi app) ---
+      - {type: system_config, config: uac_off}
+      # --- Gỡ bloatware ---
+      - {type: remove_bloatware}
+      # --- Cài online qua winget ---
+      - {type: install, package: chrome}
+      - {type: install, package: 7zip}
+      - {type: install, package: acrobat}
+      - {type: install, package: ultraviewer}
+      - {type: deploy_portable, source: "TeamViewerQS_x64.exe", dest: "C:\\Tools\\TeamViewerQS", name: "TeamViewer QS"}
+      - {type: deploy_portable, source: "unikey46RC2-230919-win64", dest: "C:\\Tools\\UniKey", name: "UniKey", exe: "UniKeyNT.exe"}
+      - {type: install, package: "vc++ x64"}
+      - {type: install, package: "vc++ x86"}
+      - {type: install, package: citrix}
+      - {type: install, package: connecttunnel}
+      - {type: install, package: "office 365"}
+      # --- Cài từ file local (không có trên winget) ---
+      - {type: install_local, path: "Desktopcentral\\LocalOffice_Agent-2310.exe"}
+      # --- Cấu hình hệ thống ---
+      - {type: system_config, config: timezone_SE_Asia_Standard_Time}
+      - {type: system_config, config: date_dmy}
+      - {type: system_config, config: show_file_ext}
+      # --- Bật lại UAC ---
+      - {type: system_config, config: uac_on}
