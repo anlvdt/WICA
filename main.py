@@ -84,9 +84,10 @@ class ChatApp:
         self._cancelled = False
         self.root = tk.Tk()
         self.root.title("WICA - Windows Install CLI Agent")
-        self.root.geometry("800x620")
-        self.root.minsize(600, 450)
         self.root.configure(bg=C["bg"])
+        # Center on screen + DPI-aware sizing
+        self._center_window(800, 620)
+        self.root.minsize(500, 380)
         self.root.update_idletasks()
         _dark_titlebar(self.root)
         self._build_input()
@@ -96,8 +97,19 @@ class ChatApp:
         self.root.bind("<Control-l>", lambda e: self._clear())
         self.root.bind("<Escape>", lambda e: self._cancel() if not self._cancelled and str(self.ent.cget("state")) == "disabled" else None)
 
+    def _center_window(self, w, h):
+        """Đặt cửa sổ giữa màn hình, xử lý cả DPI scaling."""
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
     def _build_chat(self):
-        tk.Frame(self.root, bg=C["border"], height=1).pack(fill=tk.X)
         self.chat = DarkScroll(self.root, wrap=tk.WORD, state=tk.DISABLED,
             bg=C["bg"], fg=C["text"], font=FM, insertbackground=C["text"],
             selectbackground=C["accent_dim"], selectforeground="#1e1e2e",
@@ -114,20 +126,13 @@ class ChatApp:
             self.chat.tag_configure(n, **o)
 
     def _build_input(self):
-        row = tk.Frame(self.root, bg=C["bg_alt"], padx=10, pady=8); row.pack(fill=tk.X, side=tk.BOTTOM)
+        # Bottom bar: border + input row
         tk.Frame(self.root, bg=C["border"], height=1).pack(fill=tk.X, side=tk.BOTTOM)
-        box = tk.Frame(row, bg=C["bg_input"]); box.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        # Text widget thay Entry de ho tro IME/UniKey tot hon
-        self.ent = tk.Text(box, height=1, wrap=tk.NONE, bg=C["bg_input"], fg=C["text"],
-            font=FI, insertbackground=C["accent"], relief=tk.FLAT, borderwidth=0,
-            highlightthickness=0, selectbackground=C["accent_dim"], selectforeground="#1e1e2e",
-            padx=8, pady=4, undo=True, maxundo=10)
-        self.ent.pack(fill=tk.X)
-        # Gioi han chieu cao = 1 dong (chan scroll/resize)
-        self.ent.configure(height=1)
-        self.ent.bind("<Return>", self._on_return); self.ent.focus_set(); self._setph()
-        self.ent.bind("<FocusIn>", self._clrph); self.ent.bind("<FocusOut>", self._rstph)
-        bt = tk.Frame(row, bg=C["bg_alt"]); bt.pack(side=tk.RIGHT, padx=(8,0))
+        row = tk.Frame(self.root, bg=C["bg_alt"], padx=10, pady=6)
+        row.pack(fill=tk.X, side=tk.BOTTOM)
+        # Buttons FIRST (right side, fixed width)
+        bt = tk.Frame(row, bg=C["bg_alt"])
+        bt.pack(side=tk.RIGHT, padx=(6,0))
         self._mkb(bt, "Ch\u1ecdn file", self._pick).pack(side=tk.LEFT, padx=(0,4))
         self.btn_send = self._mkb(bt, "G\u1eedi", self._send, True)
         self.btn_send.pack(side=tk.LEFT)
@@ -135,6 +140,20 @@ class ChatApp:
         self.btn_stop.configure(bg=C["fail"], fg="#ffffff")
         self.btn_stop.bind("<Enter>", lambda e: self.btn_stop.configure(bg="#e05070"))
         self.btn_stop.bind("<Leave>", lambda e: self.btn_stop.configure(bg=C["fail"]))
+        # Input box AFTER buttons (fills remaining space)
+        box = tk.Frame(row, bg=C["bg_input"])
+        box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # Text widget (IME/UniKey compatible) — single line
+        self.ent = tk.Text(box, height=1, wrap=tk.NONE, bg=C["bg_input"], fg=C["text"],
+            font=FI, insertbackground=C["accent"], relief=tk.FLAT, borderwidth=0,
+            highlightthickness=0, selectbackground=C["accent_dim"], selectforeground="#1e1e2e",
+            padx=8, pady=4, undo=True, maxundo=10)
+        self.ent.pack(fill=tk.X, padx=2, pady=2)
+        self.ent.bind("<Return>", self._on_return)
+        self.ent.focus_set()
+        self._setph()
+        self.ent.bind("<FocusIn>", self._clrph)
+        self.ent.bind("<FocusOut>", self._rstph)
 
     def _mkb(self, p, t, cmd, pri=False):
         bg=C["btn"] if pri else C["bg_alt"]; fg="#1e1e2e" if pri else C["text_dim"]
