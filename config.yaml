@@ -129,30 +129,10 @@ profiles:
   mac_dinh:
     name: "Cài đặt máy mới"
     actions:
-      # --- Tắt UAC trước (tránh popup mỗi app) ---
+      # === BƯỚC 1: Chuẩn bị hệ thống ===
       - {type: system_config, config: uac_off}
-      # --- Gỡ bloatware ---
       - {type: remove_bloatware}
-      # --- Cài online qua winget ---
-      - {type: install, package: chrome}
-      - {type: install, package: 7zip}
-      - {type: install, package: acrobat}
-      - {type: install, package: ultraviewer}
-      - {type: deploy_portable, source: "TeamViewerQS_x64.exe", dest: "C:\\Tools\\TeamViewerQS", name: "TeamViewer QS"}
-      - {type: deploy_portable, source: "unikey46RC2-230919-win64", dest: "C:\\Tools\\UniKey", name: "UniKey", exe: "UniKeyNT.exe"}
-      - {type: install, package: "vc++ x64"}
-      - {type: install, package: "vc++ x86"}
-      - {type: install, package: citrix}
-      - {type: install, package: "edge webview2"}
-      - {type: install, package: connecttunnel}
-      # --- Copy SonicWall VPN profile cho tất cả user ---
-      - {type: copy_to_all_users, source: "profiles.xml", dest_relative: "AppData\\Local\\SonicWall\\SnwlConnect\\Documents"}
-      - {type: install, package: "office 365"}
-      # --- Cài từ file local (tự tìm trong local_paths + thư mục con) ---
-      - {type: install_local, path: "LocalOffice_Agent-2310.exe"}
-      # --- Cài font VNI cho tất cả user ---
-      - {type: install_fonts, source: "Fonts"}
-      # --- Cấu hình hệ thống ---
+      # === BƯỚC 2: Cấu hình hệ thống (all users) ===
       - {type: system_config, config: timezone_SE_Asia_Standard_Time}
       - {type: system_config, config: date_dmy}
       - {type: system_config, config: show_file_ext}
@@ -164,10 +144,27 @@ profiles:
       - {type: system_config, config: disable_tips}
       - {type: system_config, config: disable_bing_search}
       - {type: system_config, config: disable_copilot}
-      - {type: system_config, config: classic_context_menu}
-      # --- Cài Teams ---
+      - {type: system_config, config: disable_telemetry}
+      # === BƯỚC 3: Cài phần mềm online (winget) ===
+      - {type: install, package: chrome}
+      - {type: install, package: 7zip}
+      - {type: install, package: acrobat}
+      - {type: install, package: ultraviewer}
+      - {type: install, package: "vc++ x64"}
+      - {type: install, package: "vc++ x86"}
+      - {type: install, package: citrix}
+      - {type: install, package: "edge webview2"}
+      - {type: install, package: connecttunnel}
+      - {type: install, package: "office 365"}
       - {type: install, package: teams}
-      # --- Bật lại UAC ---
+      # === BƯỚC 4: Deploy portable + copy files ===
+      - {type: deploy_portable, source: "TeamViewerQS_x64.exe", dest: "C:\\Tools\\TeamViewerQS", name: "TeamViewer QS"}
+      - {type: deploy_portable, source: "unikey46RC2-230919-win64", dest: "C:\\Tools\\UniKey", name: "UniKey", exe: "UniKeyNT.exe"}
+      - {type: copy_to_all_users, source: "profiles.xml", dest_relative: "AppData\\Local\\SonicWall\\SnwlConnect\\Documents"}
+      - {type: install_fonts, source: "Fonts"}
+      # === BƯỚC 5: Cài từ file local ===
+      - {type: install_local, path: "LocalOffice_Agent-2310.exe"}
+      # === BƯỚC 6: Bật lại UAC ===
       - {type: system_config, config: uac_on}
 
 # === Quick Commands - Lệnh nhanh riêng lẻ ===

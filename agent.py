@@ -163,7 +163,6 @@ class AntiGravityAgent:
             # Fallback 2: thử HKEY_USERS với SID của user đang login
             try:
                 import winreg
-                import ctypes
                 # Lấy tất cả SID trong HKEY_USERS
                 i = 0
                 while True:

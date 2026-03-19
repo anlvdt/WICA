@@ -1170,16 +1170,6 @@ class SystemConfigurator:
                 except OSError:
                     pass
 
-        # RAM từ registry (không cần PowerShell)
-        try:
-            key = winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"HARDWARE\RESOURCEMAP\System Resources\Physical Memory"
-            )
-            winreg.CloseKey(key)
-        except Exception:
-            pass
-
         return "\n".join(info) if info else "[error] Không lấy được thông tin."
 
     def get_hostname(self) -> str:
@@ -1237,66 +1227,6 @@ class SystemConfigurator:
         return f"[ok] Đã đặt tên máy: {new_name}\nCần khởi động lại để có hiệu lực."
 
 
-    def get_hostname(self) -> str:
-        """Lấy tên máy hiện tại — Python stdlib, EDR-safe."""
-        _audit("HOSTNAME_GET", "reading")
-        name = os.environ.get("COMPUTERNAME", "")
-        if not name:
-            try:
-                name = platform.node()
-            except Exception:
-                name = ""
-        if name:
-            return f"[info] Tên máy hiện tại: {name}"
-        return "[error] Không lấy được tên máy"
-
-    def set_hostname(self, new_name: str) -> str:
-        """Đặt tên máy mới qua registry — EDR-safe (winreg only).
-
-        Ghi vào 2 registry key:
-        - HKLM\\SYSTEM\\CurrentControlSet\\Control\\ComputerName\\ComputerName
-        - HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters
-        Cần restart để có hiệu lực.
-        """
-        new_name = new_name.strip()
-        if not new_name or len(new_name) > 15:
-            return "[error] Tên máy phải từ 1-15 ký tự"
-        # Chỉ cho phép ký tự hợp lệ
-        import re as _re
-        if not _re.match(r'^[A-Za-z0-9\-]+$', new_name):
-            return "[error] Tên máy chỉ được chứa chữ, số và dấu gạch ngang"
-        _audit("HOSTNAME_SET", f"new={new_name}")
-        errors = []
-        # Key 1: ComputerName
-        ok1, msg1 = _set_registry(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName",
-            "ComputerName", new_name, winreg.REG_SZ
-        )
-        if not ok1:
-            errors.append(msg1)
-        # Key 2: Tcpip hostname
-        ok2, msg2 = _set_registry(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
-            "Hostname", new_name, winreg.REG_SZ
-        )
-        if not ok2:
-            errors.append(msg2)
-        # Key 3: NV Hostname (persistent)
-        ok3, msg3 = _set_registry(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
-            "NV Hostname", new_name, winreg.REG_SZ
-        )
-        if not ok3:
-            errors.append(msg3)
-        if errors:
-            return f"[error] Lỗi đặt tên máy:\n" + "\n".join(errors)
-        return f"[ok] Đã đặt tên máy: {new_name}\nCần khởi động lại để có hiệu lực."
-
-
-
 # --- CLI Command Runner ---
 # Whitelist các lệnh an toàn cho phép chạy trực tiếp
 # KHÔNG có powershell, cmd, hoặc bất kỳ shell nào
@@ -1345,8 +1275,6 @@ def _run_cli_command(command_str: str, timeout: int = 60) -> str:
     - Chỉ chạy lệnh trong whitelist
     - Tất cả được audit log
     """
-    import shlex
-    
     command_str = command_str.strip()
     if not command_str:
         return "[error] Lệnh trống"
