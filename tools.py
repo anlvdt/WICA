@@ -613,6 +613,10 @@ def _is_winget_installed(pkg_id: str) -> bool:
 
     EDR-safe: chỉ gọi winget.exe trực tiếp.
     Timeout ngắn (15s) vì chỉ cần check, không cài.
+
+    Khi chạy Run as different user/Admin, winget source của user đó
+    có thể chưa init → thử cả --scope machine (cài machine-wide
+    thì user nào query cũng thấy).
     """
     try:
         proc = subprocess.Popen(
@@ -624,7 +628,7 @@ def _is_winget_installed(pkg_id: str) -> bool:
             encoding="utf-8",
             errors="replace",
         )
-        stdout, _ = proc.communicate(timeout=15)
+        stdout, stderr = proc.communicate(timeout=15)
         try:
             if proc.stdout:
                 proc.stdout.close()
@@ -636,8 +640,61 @@ def _is_winget_installed(pkg_id: str) -> bool:
         # winget list trả về bảng có chứa pkg_id nếu đã cài
         if proc.returncode == 0 and pkg_id.lower() in stdout.lower():
             return True
+        # Fallback: check "already installed" trong output
+        combined = (stdout + stderr).lower()
+        if "already installed" in combined:
+            return True
     except Exception:
         pass
+    # Fallback 2: check trực tiếp trong registry Uninstall keys
+    # (hoạt động bất kể user context nào, không cần winget source)
+    return _is_installed_via_registry(pkg_id)
+
+
+def _is_installed_via_registry(pkg_id: str) -> bool:
+    """Check app đã cài chưa qua registry Uninstall keys.
+
+    Đây là fallback khi winget list fail (Run as different user).
+    Check cả HKLM (machine-wide) và HKU (per-user).
+    EDR-safe: chỉ dùng winreg (Python stdlib).
+    """
+    search = pkg_id.lower()
+    # Tách tên ngắn từ winget ID: "Google.Chrome" → "chrome", "google chrome"
+    parts = search.replace(".", " ").split()
+
+    uninstall_paths = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+    for hive, path in uninstall_paths:
+        try:
+            key = winreg.OpenKey(hive, path, 0, winreg.KEY_READ)
+            i = 0
+            while True:
+                try:
+                    subkey_name = winreg.EnumKey(key, i)
+                    # Check winget ID trực tiếp trong subkey name
+                    if search in subkey_name.lower():
+                        winreg.CloseKey(key)
+                        return True
+                    # Check DisplayName
+                    try:
+                        sk = winreg.OpenKey(key, subkey_name, 0, winreg.KEY_READ)
+                        display_name, _ = winreg.QueryValueEx(sk, "DisplayName")
+                        winreg.CloseKey(sk)
+                        dn = display_name.lower()
+                        # Match nếu tất cả parts của winget ID có trong DisplayName
+                        if all(p in dn for p in parts):
+                            winreg.CloseKey(key)
+                            return True
+                    except (OSError, FileNotFoundError):
+                        pass
+                    i += 1
+                except OSError:
+                    break
+            winreg.CloseKey(key)
+        except (OSError, FileNotFoundError):
+            pass
     return False
 
 
@@ -645,32 +702,50 @@ def _is_registry_set(config_name: str) -> bool:
     """Kiểm tra registry config đã được áp dụng chưa.
 
     EDR-safe: chỉ dùng winreg (Python stdlib).
-    Chỉ check HKCU (user hiện tại) hoặc HKLM tùy config.
+
+    Khi chạy Run as different user/Admin, HKCU là của admin user,
+    không phải user thật. Nên với HKCU configs, check qua
+    HKEY_USERS\\{SID} iteration — nếu BẤT KỲ user nào đã có config
+    thì coi như đã áp dụng (vì apply() ghi cho tất cả user).
     """
     reg_cfg = REGISTRY_CONFIGS.get(config_name)
     if not reg_cfg:
         return False
     hive = reg_cfg["hive"]
     key_path = reg_cfg["key"]
+
+    if hive == winreg.HKEY_CURRENT_USER:
+        # Check qua HKEY_USERS SID iteration
+        sids = _get_user_sids()
+        if not sids:
+            # Fallback: check HKCU trực tiếp
+            return _check_registry_values(winreg.HKEY_CURRENT_USER, key_path, reg_cfg["values"])
+        # Nếu bất kỳ real user SID nào đã có config → đã áp dụng
+        for sid in sids:
+            full_path = f"{sid}\\{key_path}"
+            if _check_registry_values(winreg.HKEY_USERS, full_path, reg_cfg["values"]):
+                return True
+        return False
+    else:
+        # HKLM → check trực tiếp
+        return _check_registry_values(hive, key_path, reg_cfg["values"])
+
+
+def _check_registry_values(hive, key_path: str, values: list) -> bool:
+    """Check tất cả registry values có match expected không."""
     try:
-        if hive == winreg.HKEY_CURRENT_USER:
-            # Check HKCU trực tiếp (user hiện tại)
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
-                                 winreg.KEY_READ)
-        else:
-            key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
-        all_match = True
-        for value_name, expected, value_type in reg_cfg["values"]:
+        key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
+        for value_name, expected, value_type in values:
             try:
                 actual, _ = winreg.QueryValueEx(key, value_name)
                 if actual != expected:
-                    all_match = False
-                    break
+                    winreg.CloseKey(key)
+                    return False
             except FileNotFoundError:
-                all_match = False
-                break
+                winreg.CloseKey(key)
+                return False
         winreg.CloseKey(key)
-        return all_match
+        return True
     except (OSError, FileNotFoundError):
         return False
 

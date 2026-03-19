@@ -524,7 +524,7 @@ class AntiGravityAgent:
         results.append(f"\n[ok] Hoàn thành profile: {pname}")
         return "\n".join(results)
 
-    def _run_profile_feedback(self, name: str, on_output):
+    def _run_profile_feedback(self, name: str, on_output, on_raise=None):
         profile = self._find_profile(name)
         if not profile:
             on_output(f"[error] Không tìm thấy profile: {name}", "fail")
@@ -557,8 +557,15 @@ class AntiGravityAgent:
                 if action.get("type") == "remove_bloatware":
                     self._remove_bloatware_feedback(on_output)
                     ok_count += 1
+                    # Đưa cửa sổ chính lên trên sau mỗi bước
+                    if on_raise:
+                        on_raise()
                     continue
                 result = self._execute_action(action)
+                # Đưa cửa sổ chính lên trên sau mỗi bước
+                # (winget/installer console có thể che cửa sổ chính)
+                if on_raise:
+                    on_raise()
                 if result:
                     if "[ok]" in result or "[info]" in result:
                         on_output(f"  {result}", "ok")
@@ -637,7 +644,7 @@ class AntiGravityAgent:
             else: fail += 1
         on_output(f"[ok] Bloatware: {ok} đã gỡ, {skip} không có, {fail} lỗi", "ok")
 
-    def chat_with_feedback(self, user_input: str, on_output):
+    def chat_with_feedback(self, user_input: str, on_output, on_raise=None):
         self._cancelled = False
         # === FAST PATH ===
         fast_actions = parse_fast(user_input, self.config.get("quick_commands"))
@@ -659,7 +666,7 @@ class AntiGravityAgent:
                         on_output("clear", "_ui_cmd")
                         continue
                     if atype == "run_profile":
-                        self._run_profile_feedback(action.get("name", ""), on_output)
+                        self._run_profile_feedback(action.get("name", ""), on_output, on_raise)
                         continue
                     if atype == "list_profiles":
                         on_output(self._list_profiles(), "info")

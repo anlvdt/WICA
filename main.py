@@ -3,7 +3,7 @@
 Dark title bar via DWM API. Custom scrollbar. No emoji. EDR-safe.
 """
 import sys, os, re, threading, ctypes, tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 if getattr(sys, 'frozen', False):
     os.chdir(os.path.dirname(sys.executable))
 from agent import AntiGravityAgent
@@ -100,7 +100,7 @@ class ChatApp:
         self._welcome()
         # Keyboard shortcuts
         self.root.bind("<Control-l>", lambda e: self._clear())
-        self.root.bind("<Escape>", lambda e: self._cancel() if not self._cancelled and str(self.ent.cget("state")) == "disabled" else None)
+        self.root.bind("<Escape>", lambda e: self._cancel() if not self._cancelled and "disabled" in str(self.ent.state()) else None)
 
     def _center_window(self, w, h):
         """Đặt cửa sổ giữa màn hình."""
@@ -110,27 +110,6 @@ class ChatApp:
         x = max(0, (sw - w) // 2)
         y = max(0, (sh - h) // 2)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
-
-    def _enable_ime(self):
-        """Force enable IME (UniKey/Telex) cho input widget.
-
-        Tkinter/Tcl trên Windows thường disable IME context.
-        Gọi ImmAssociateContextEx với IACE_DEFAULT để restore IME
-        cho cả root window và tất cả child windows.
-        imm32.dll là Windows system DLL, EDR-safe.
-        """
-        try:
-            IACE_DEFAULT = 0x0010
-            IACE_CHILDREN = 0x0001
-            # Apply cho root window
-            root_hwnd = self.root.winfo_id()
-            ctypes.windll.imm32.ImmAssociateContextEx(root_hwnd, 0, IACE_DEFAULT)
-            ctypes.windll.imm32.ImmAssociateContextEx(root_hwnd, 0, IACE_CHILDREN)
-            # Apply trực tiếp cho input widget (Text widget có HWND riêng)
-            ent_hwnd = self.ent.winfo_id()
-            ctypes.windll.imm32.ImmAssociateContextEx(ent_hwnd, 0, IACE_DEFAULT)
-        except Exception:
-            pass
 
     def _build_chat(self):
         self.chat = DarkScroll(self.root, wrap=tk.WORD, state=tk.DISABLED,
@@ -166,16 +145,25 @@ class ChatApp:
         # Input box AFTER buttons (fills remaining space)
         box = tk.Frame(row, bg=C["bg_input"])
         box.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        # Text widget (IME/UniKey compatible) — single line
-        self.ent = tk.Text(box, height=1, wrap=tk.NONE, bg=C["bg_input"], fg=C["text"],
-            font=FI, insertbackground=C["accent"], relief=tk.FLAT, borderwidth=0,
-            highlightthickness=0, selectbackground=C["accent_dim"], selectforeground="#1e1e2e",
-            padx=8, pady=4, undo=True, maxundo=10)
+        # ttk.Entry — dùng native Windows EDIT control, hỗ trợ IME/UniKey
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("Dark.TEntry",
+            fieldbackground=C["bg_input"],
+            foreground=C["text"],
+            insertcolor=C["accent"],
+            borderwidth=0,
+            relief="flat",
+            padding=(8, 4),
+        )
+        style.map("Dark.TEntry",
+            fieldbackground=[("disabled", C["bg_input"]), ("readonly", C["bg_input"])],
+            foreground=[("disabled", C["text_dim"])],
+        )
+        self.ent = ttk.Entry(box, style="Dark.TEntry", font=FI)
         self.ent.pack(fill=tk.X, padx=2, pady=2)
         self.ent.bind("<Return>", self._on_return)
         self.ent.focus_set()
-        # Force enable IME (UniKey/Telex) cho input widget
-        self.root.after(100, self._enable_ime)
         self._setph()
         self.ent.bind("<FocusIn>", self._clrph)
         self.ent.bind("<FocusOut>", self._rstph)
@@ -189,23 +177,23 @@ class ChatApp:
         b.bind("<Leave>", lambda e: b.configure(bg=bg))
         return b
 
-    # -- helpers cho Text widget (thay StringVar) --
+    # -- helpers cho ttk.Entry --
     def _get_input(self):
-        return self.ent.get("1.0", "end-1c").strip()
+        return self.ent.get().strip()
     def _set_input(self, text):
-        self.ent.delete("1.0", tk.END)
-        if text: self.ent.insert("1.0", text)
+        self.ent.delete(0, tk.END)
+        if text: self.ent.insert(0, text)
     def _on_return(self, e):
         self._send()
-        return "break"  # chan newline trong single-line Text
+        return "break"
 
     def _setph(self):
         if not self._get_input():
-            self.ent.configure(fg=C["text_dim"])
+            self.ent.configure(foreground=C["text_dim"])
             self._set_input("Nh\u1eadp l\u1ec7nh... (vd: c\u00e0i chrome, g\u1ee1 teamviewer)")
             self._ph = True
     def _clrph(self, e=None):
-        if self._ph: self._set_input(""); self.ent.configure(fg=C["text"]); self._ph=False
+        if self._ph: self._set_input(""); self.ent.configure(foreground=C["text"]); self._ph=False
     def _rstph(self, e=None):
         if not self._get_input(): self._setph()
 
@@ -267,11 +255,11 @@ class ChatApp:
     def _busy(self, on):
         if on:
             self._cancelled = False
-            self.ent.configure(state=tk.DISABLED, bg=C["bg_input"], fg=C["text_dim"])
+            self.ent.configure(state="disabled")
             self.btn_send.pack_forget()
             self.btn_stop.pack(side=tk.LEFT)
         else:
-            self.ent.configure(state=tk.NORMAL, bg=C["bg_input"], fg=C["text"])
+            self.ent.configure(state="normal")
             self.btn_stop.pack_forget()
             self.btn_send.pack(side=tk.LEFT)
             self.ent.focus_set()
@@ -298,13 +286,15 @@ class ChatApp:
         threading.Thread(target=self._exec, args=(t,), daemon=True).start()
 
     def _exec(self, t):
-        try: self.agent.chat_with_feedback(t, self._out_s)
+        try: self.agent.chat_with_feedback(t, self._out_s, self._schedule_raise)
         except Exception as e: self._out_s(f"[error] {e}", "fail")
         self.root.after(0, self._w, "  "+"-"*52+"\n", "divider")
         self.root.after(0, self._busy, False)
-        # Đưa cửa sổ chính lên trên sau khi task hoàn thành
-        # (winget console có thể che cửa sổ chính)
         self.root.after(100, self._raise_window)
+
+    def _schedule_raise(self):
+        """Schedule raise window trên main thread (gọi từ worker thread)."""
+        self.root.after(50, self._raise_window)
 
     def _raise_window(self):
         """Đưa cửa sổ chính lên trên cùng."""
