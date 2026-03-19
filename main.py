@@ -121,8 +121,10 @@ class ChatApp:
         self.ent = tk.Text(box, height=1, wrap=tk.NONE, bg=C["bg_input"], fg=C["text"],
             font=FI, insertbackground=C["accent"], relief=tk.FLAT, borderwidth=0,
             highlightthickness=0, selectbackground=C["accent_dim"], selectforeground="#1e1e2e",
-            padx=8, pady=7)
+            padx=8, pady=4, undo=True, maxundo=10)
         self.ent.pack(fill=tk.X)
+        # Gioi han chieu cao = 1 dong (chan scroll/resize)
+        self.ent.configure(height=1)
         self.ent.bind("<Return>", self._on_return); self.ent.focus_set(); self._setph()
         self.ent.bind("<FocusIn>", self._clrph); self.ent.bind("<FocusOut>", self._rstph)
         bt = tk.Frame(row, bg=C["bg_alt"]); bt.pack(side=tk.RIGHT, padx=(8,0))
@@ -222,11 +224,11 @@ class ChatApp:
     def _busy(self, on):
         if on:
             self._cancelled = False
-            self.ent.configure(state=tk.DISABLED)
+            self.ent.configure(state=tk.DISABLED, bg=C["bg_input"], fg=C["text_dim"])
             self.btn_send.pack_forget()
             self.btn_stop.pack(side=tk.LEFT)
         else:
-            self.ent.configure(state=tk.NORMAL)
+            self.ent.configure(state=tk.NORMAL, bg=C["bg_input"], fg=C["text"])
             self.btn_stop.pack_forget()
             self.btn_send.pack(side=tk.LEFT)
             self.ent.focus_set()
