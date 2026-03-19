@@ -698,6 +698,43 @@ def _is_installed_via_registry(pkg_id: str) -> bool:
     return False
 
 
+def _get_installed_list() -> set:
+    """Lấy danh sách tất cả app đã cài (lowercase) bằng winget list MỘT LẦN.
+
+    Trả về set of lowercase package IDs/names.
+    Dùng cho batch check (bloatware) thay vì gọi winget list N lần.
+    Fallback: trả về empty set nếu winget fail.
+    EDR-safe: chỉ gọi winget.exe trực tiếp.
+    """
+    installed = set()
+    try:
+        proc = subprocess.Popen(
+            ["winget", "list", "--accept-source-agreements", "--disable-interactivity"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        stdout, _ = proc.communicate(timeout=30)
+        try:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        if proc.returncode == 0:
+            for line in stdout.lower().split("\n"):
+                installed.add(line.strip())
+            # Cũng thêm từng từ riêng lẻ để match flexible hơn
+            _audit("INSTALLED_LIST", f"got {len(installed)} lines", "OK")
+    except Exception:
+        _audit("INSTALLED_LIST", "winget list failed", "FAIL")
+    return installed
+
+
 def _is_registry_set(config_name: str) -> bool:
     """Kiểm tra registry config đã được áp dụng chưa.
 

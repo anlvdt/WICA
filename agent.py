@@ -8,7 +8,7 @@ import json
 import yaml
 import os
 from openai import OpenAI
-from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, deploy_portable, set_progress_callback, _run_cli_command, copy_to_all_users, install_fonts, _is_winget_installed, _is_registry_set, _is_deployed, _are_fonts_installed, _is_copied_to_users
+from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, deploy_portable, set_progress_callback, _run_cli_command, copy_to_all_users, install_fonts, _is_winget_installed, _is_registry_set, _is_deployed, _are_fonts_installed, _is_copied_to_users, _get_installed_list
 from fast_commands import parse_fast
 from keystore import get_key
 
@@ -555,7 +555,7 @@ class AntiGravityAgent:
                     continue
                 on_output(f"  [{i}/{len(actions)}] {desc}", "progress")
                 if action.get("type") == "remove_bloatware":
-                    self._remove_bloatware_feedback(on_output)
+                    self._remove_bloatware_feedback(on_output, on_raise)
                     ok_count += 1
                     # Đưa cửa sổ chính lên trên sau mỗi bước
                     if on_raise:
@@ -625,23 +625,31 @@ class AntiGravityAgent:
             else: fail += 1
         return f"[ok] Gỡ bloatware xong: {ok} đã gỡ, {skip} không có, {fail} lỗi"
 
-    def _remove_bloatware_feedback(self, on_output):
+    def _remove_bloatware_feedback(self, on_output, on_raise=None):
         bloatware = self.config.get("bloatware", [])
         if not bloatware:
             on_output("[info] Danh sách bloatware trống.", "info")
             return
         _audit("BLOATWARE", f"count={len(bloatware)}", "OK")
-        on_output(f"[...] Đang gỡ {len(bloatware)} bloatware...", "progress")
+        # Lấy danh sách app đã cài MỘT LẦN (thay vì check từng app)
+        on_output(f"[...] Đang kiểm tra {len(bloatware)} bloatware...", "progress")
+        installed_output = _get_installed_list()
         ok = skip = fail = 0
         for i, pkg_id in enumerate(bloatware, 1):
             if self._cancelled:
                 on_output(f"[warn] Đã dừng tại {i}/{len(bloatware)}", "warn")
                 break
-            on_output(f"    [{i}/{len(bloatware)}] {pkg_id}...", "info")
+            # Skip nếu app không có trên máy (check pkg_id trong output lines)
+            found = any(pkg_id.lower() in line for line in installed_output)
+            if not found:
+                skip += 1
+                continue
+            on_output(f"    [{i}/{len(bloatware)}] Đang gỡ {pkg_id}...", "info")
             result = self.sw.uninstall_system(pkg_id)
             if "[ok]" in result: ok += 1
-            elif "[info]" in result: skip += 1
             else: fail += 1
+            if on_raise:
+                on_raise()
         on_output(f"[ok] Bloatware: {ok} đã gỡ, {skip} không có, {fail} lỗi", "ok")
 
     def chat_with_feedback(self, user_input: str, on_output, on_raise=None):
