@@ -111,6 +111,27 @@ class ChatApp:
         y = max(0, (sh - h) // 2)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
+    def _enable_ime(self):
+        """Force enable IME (UniKey/Telex) cho input widget.
+
+        Tkinter/Tcl trên Windows thường disable IME context.
+        Gọi ImmAssociateContextEx với IACE_DEFAULT để restore IME
+        cho cả root window và tất cả child windows.
+        imm32.dll là Windows system DLL, EDR-safe.
+        """
+        try:
+            IACE_DEFAULT = 0x0010
+            IACE_CHILDREN = 0x0001
+            # Apply cho root window
+            root_hwnd = self.root.winfo_id()
+            ctypes.windll.imm32.ImmAssociateContextEx(root_hwnd, 0, IACE_DEFAULT)
+            ctypes.windll.imm32.ImmAssociateContextEx(root_hwnd, 0, IACE_CHILDREN)
+            # Apply trực tiếp cho input widget (Text widget có HWND riêng)
+            ent_hwnd = self.ent.winfo_id()
+            ctypes.windll.imm32.ImmAssociateContextEx(ent_hwnd, 0, IACE_DEFAULT)
+        except Exception:
+            pass
+
     def _build_chat(self):
         self.chat = DarkScroll(self.root, wrap=tk.WORD, state=tk.DISABLED,
             bg=C["bg"], fg=C["text"], font=FM, insertbackground=C["text"],
@@ -153,6 +174,8 @@ class ChatApp:
         self.ent.pack(fill=tk.X, padx=2, pady=2)
         self.ent.bind("<Return>", self._on_return)
         self.ent.focus_set()
+        # Force enable IME (UniKey/Telex) cho input widget
+        self.root.after(100, self._enable_ime)
         self._setph()
         self.ent.bind("<FocusIn>", self._clrph)
         self.ent.bind("<FocusOut>", self._rstph)
@@ -279,6 +302,19 @@ class ChatApp:
         except Exception as e: self._out_s(f"[error] {e}", "fail")
         self.root.after(0, self._w, "  "+"-"*52+"\n", "divider")
         self.root.after(0, self._busy, False)
+        # Đưa cửa sổ chính lên trên sau khi task hoàn thành
+        # (winget console có thể che cửa sổ chính)
+        self.root.after(100, self._raise_window)
+
+    def _raise_window(self):
+        """Đưa cửa sổ chính lên trên cùng."""
+        try:
+            self.root.lift()
+            self.root.focus_force()
+            self.root.attributes('-topmost', True)
+            self.root.after(200, lambda: self.root.attributes('-topmost', False))
+        except Exception:
+            pass
 
     def _pick(self):
         ps = filedialog.askopenfilenames(title="Ch\u1ecdn file c\u00e0i \u0111\u1eb7t",

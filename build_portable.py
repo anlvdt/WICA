@@ -73,6 +73,16 @@ def _create_keyfile(dest_dir: str):
 def build():
     print(f"[build] Dang build {APP_NAME} portable...")
 
+    # === CLEAN BUILD: Xoa cache cu de dam bao code moi nhat ===
+    for d in ["build", os.path.join(DIST_DIR, APP_NAME)]:
+        if os.path.exists(d):
+            print(f"  [clean] Xoa {d}/")
+            shutil.rmtree(d)
+    spec_file = f"{APP_NAME}.spec"
+    if os.path.isfile(spec_file):
+        print(f"  [clean] Xoa {spec_file}")
+        os.remove(spec_file)
+
     # PyInstaller FOLDER mode (EDR-safe, KHONG --onefile)
     subprocess.run([
         "pyinstaller",
@@ -128,6 +138,29 @@ def build():
     print(f"      +-- config.yaml      (Cau hinh)")
     print(f"      +-- logs/            (Audit log)")
     print(f"\n[ok] ZIP: {zip_file} ({zip_size:.1f} MB)")
+
+    # === Auto copy sang USB (F:\App\) va ZIP (F:\) ===
+    usb_app = r"F:\App"
+    usb_zip = r"F:\WICA-Portable.zip"
+    src_app = os.path.join(USB_DIR, APP_NAME)
+    if os.path.exists("F:\\"):
+        # Copy app sang USB
+        try:
+            if os.path.exists(usb_app):
+                shutil.rmtree(usb_app)
+            shutil.copytree(src_app, usb_app, dirs_exist_ok=True)
+            print(f"\n[ok] Da copy sang USB: {usb_app}")
+        except Exception as e:
+            print(f"\n[warn] Loi copy sang USB: {e}")
+        # Copy ZIP sang USB
+        try:
+            shutil.copy2(zip_file, usb_zip)
+            print(f"[ok] Da copy ZIP sang USB: {usb_zip}")
+        except Exception as e:
+            print(f"[warn] Loi copy ZIP: {e}")
+    else:
+        print(f"\n[info] USB (F:) khong co. Copy thu cong:")
+
     print(f"\nCopy file .zip hoac thu muc {APP_NAME}-USB vao USB de su dung.")
     print(f"Giai nen zip, chay {APP_NAME}.exe truc tiep, khong can cai dat.")
 
