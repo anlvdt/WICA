@@ -187,7 +187,6 @@ class ChatApp:
         if not self._get_input(): self._setph()
 
     def _welcome(self):
-        self._w("  WICA - Windows Install CLI Agent\n\n", "title")
         if self.agent.client:
             self._w(f"  [connected] {self.agent.provider_name} ({self.agent.model})\n\n", "ok")
         else:
