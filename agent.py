@@ -16,39 +16,68 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.y
 MAX_HISTORY = 20
 
 SYSTEM_PROMPT = """Bạn là WICA (Windows Install CLI Agent), trợ lý quản lý hệ thống Windows qua chat.
-Bạn có thể: cài đặt phần mềm (online qua winget hoặc từ file local), gỡ phần mềm, cấu hình hệ thống.
 
-QUAN TRỌNG: Bạn PHẢI trả lời bằng JSON với format sau:
+KHẢ NĂNG:
+- Cài/gỡ phần mềm qua winget (online) hoặc từ file local (os.startfile)
+- Cấu hình hệ thống Windows (registry, timezone, hostname...)
+- Chạy profile cài đặt hàng loạt (cài máy mới)
+- Deploy app portable (copy + tạo shortcut)
+- Copy file cho tất cả user (VPN profile, font...)
+- Chạy lệnh CLI trực tiếp (ipconfig, ping, netstat...)
+- Gỡ bloatware hàng loạt
+
+QUAN TRỌNG: Bạn PHẢI trả lời bằng JSON:
 {{
-  "message": "Tin nhắn cho người dùng",
-  "actions": [
-    {{"type": "install", "package": "tên_package"}},
-    {{"type": "install_local", "path": "đường_dẫn_file"}},
-    {{"type": "uninstall", "package": "tên_package"}},
-    {{"type": "search", "query": "từ_khóa"}},
-    {{"type": "list_installed"}},
-    {{"type": "system_config", "config": "tên_config"}},
-    {{"type": "system_info"}},
-    {{"type": "upgrade_all"}},
-    {{"type": "export_apps", "path": "đường_dẫn_file.json"}}
-  ]
+  "message": "Tin nhắn cho người dùng (tiếng Việt có dấu)",
+  "actions": [...]
 }}
 
-Nếu chỉ trò chuyện, trả về actions rỗng: {{"message": "...", "actions": []}}
+CÁC ACTION TYPES:
+- {{"type": "install", "package": "tên hoặc alias"}}
+- {{"type": "install_local", "path": "tên_file.exe"}}  (tự tìm trong thư mục local)
+- {{"type": "uninstall", "package": "tên hoặc alias"}}
+- {{"type": "search", "query": "từ_khóa"}}
+- {{"type": "list_installed"}}
+- {{"type": "system_config", "config": "tên_config"}}
+- {{"type": "system_info"}}
+- {{"type": "get_hostname"}}
+- {{"type": "set_hostname", "name": "TÊN-MÁY"}}
+- {{"type": "upgrade_all"}}
+- {{"type": "export_apps"}}
+- {{"type": "deploy_portable", "source": "file_hoặc_folder", "dest": "C:\\Tools\\TenApp", "name": "Tên App"}}
+- {{"type": "copy_to_all_users", "source": "file_nguồn", "dest_relative": "đường_dẫn_tương_đối"}}
+- {{"type": "install_fonts", "source": "thư_mục_font"}}
+- {{"type": "remove_bloatware"}}
+- {{"type": "run_profile", "name": "mac_dinh"}}
+- {{"type": "cli", "command": "lệnh CLI"}}
 
-Aliases phần mềm có sẵn:
+Nếu chỉ trò chuyện (hỏi đáp, tư vấn), trả về actions rỗng: {{"message": "...", "actions": []}}
+
+ALIASES phần mềm:
 {aliases}
 
-System configs có sẵn:
+SYSTEM CONFIGS:
 {configs}
 
-Quy tắc:
-- Luôn xác nhận trước khi thực hiện hành động nguy hiểm
+QUICK COMMANDS (lệnh nhanh có sẵn):
+{quick_commands}
+
+PROFILES:
+{profiles}
+
+THÔNG TIN MÁY:
+{system_context}
+
+QUY TẮC:
+- Luôn trả lời bằng tiếng Việt có dấu
 - Dùng alias nếu có, nếu không dùng tên gốc để search winget
-- Với nhiều phần mềm, tạo nhiều actions
-- Khi user muốn cài từ file local, dùng "install_local" với đường dẫn đầy đủ
-- install_local sẽ mở installer bình thường (giống user double-click), KHÔNG silent install
-- Trả lời bằng tiếng Việt có dấu
+- Với nhiều phần mềm, tạo nhiều actions riêng biệt
+- install_local: chỉ cần tên file, hệ thống tự tìm trong thư mục local
+- KHÔNG BAO GIỜ đề xuất download file từ internet
+- KHÔNG BAO GIỜ đề xuất chạy PowerShell script
+- Khi user hỏi về vấn đề Windows, hãy tư vấn và đề xuất action cụ thể nếu có thể
+- Khi không chắc chắn, hỏi lại user thay vì đoán
+- Nếu user hỏi cách làm gì đó mà app hỗ trợ, hướng dẫn dùng lệnh nhanh
 """
 
 
@@ -75,8 +104,36 @@ class AntiGravityAgent:
             {"role": "system", "content": SYSTEM_PROMPT.format(
                 aliases=json.dumps(self.aliases, indent=2, ensure_ascii=False),
                 configs=json.dumps(list(REGISTRY_CONFIGS.keys()), ensure_ascii=False),
+                quick_commands=json.dumps(
+                    list(self.config.get("quick_commands", {}).keys()),
+                    ensure_ascii=False,
+                ),
+                profiles=json.dumps(
+                    {k: v.get("name", k) for k, v in self.config.get("profiles", {}).items()},
+                    ensure_ascii=False,
+                ),
+                system_context=self._get_system_context(),
             )}
         ]
+
+    @staticmethod
+    def _get_system_context() -> str:
+        """Lấy thông tin cơ bản về máy để LLM có context."""
+        import platform
+        parts = [
+            f"OS: {platform.system()} {platform.release()} ({platform.version()})",
+            f"Hostname: {platform.node()}",
+            f"Arch: {platform.machine()}",
+        ]
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion") as k:
+                name, _ = winreg.QueryValueEx(k, "ProductName")
+                parts[0] = f"OS: {name} ({platform.version()})"
+        except Exception:
+            pass
+        return " | ".join(parts)
 
     def _resolve_api_key(self, raw_key: str) -> str:
         """Resolve API key: nếu bắt đầu bằng 'env:' thì đọc từ biến môi trường.
@@ -189,13 +246,47 @@ class AntiGravityAgent:
         path = path.strip().strip('"').strip("'")
         if os.path.isabs(path):
             return path
+        # 1. Thử ghép trực tiếp base + path (nhanh nhất)
         for base in self.local_paths:
             full = os.path.join(base, path)
             if os.path.exists(full):
                 return full
+        # 2. Tìm trong thư mục con (max 3 cấp) — chỉ trong local_paths whitelist
+        #    Dùng os.scandir thay vì os.walk để kiểm soát depth, không quét toàn bộ ổ đĩa
+        fname = os.path.basename(path).lower()
+        for base in self.local_paths:
+            found = self._find_in_subfolders(base, fname, max_depth=3)
+            if found:
+                _audit("RESOLVE_PATH", f"found in subfolder: {found}", "OK")
+                return found
         tried = ", ".join(self.local_paths) if self.local_paths else "(chưa cấu hình local_paths)"
         _audit("RESOLVE_PATH", f"not found: {path} in {tried}", "FAIL")
         return path
+
+    @staticmethod
+    def _find_in_subfolders(base: str, filename_lower: str, max_depth: int = 3) -> str:
+        """Tìm file theo tên trong thư mục con (giới hạn depth).
+
+        CHỈ tìm trong local_paths whitelist, KHÔNG quét ổ đĩa.
+        Dùng os.scandir (không dùng os.walk) để kiểm soát chính xác depth.
+        """
+        if not os.path.isdir(base):
+            return ""
+        try:
+            for entry in os.scandir(base):
+                if entry.is_file() and entry.name.lower() == filename_lower:
+                    return entry.path
+            if max_depth > 0:
+                for entry in os.scandir(base):
+                    if entry.is_dir() and not entry.name.startswith("."):
+                        found = AntiGravityAgent._find_in_subfolders(
+                            entry.path, filename_lower, max_depth - 1
+                        )
+                        if found:
+                            return found
+        except PermissionError:
+            pass
+        return ""
 
     def _is_safe_path(self, path: str) -> bool:
         """Kiểm tra path nằm trong local_paths cho phép (chống path traversal)."""

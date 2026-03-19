@@ -148,8 +148,8 @@ profiles:
       # --- Copy SonicWall VPN profile cho tất cả user ---
       - {type: copy_to_all_users, source: "profiles.xml", dest_relative: "AppData\\Local\\SonicWall\\SnwlConnect\\Documents"}
       - {type: install, package: "office 365"}
-      # --- Cài từ file local (không có trên winget) ---
-      - {type: install_local, path: "Desktopcentral\\LocalOffice_Agent-2310.exe"}
+      # --- Cài từ file local (tự tìm trong local_paths + thư mục con) ---
+      - {type: install_local, path: "LocalOffice_Agent-2310.exe"}
       # --- Cài font VNI cho tất cả user ---
       - {type: install_fonts, source: "Fonts"}
       # --- Cấu hình hệ thống ---
@@ -191,6 +191,13 @@ quick_commands:
     action: {type: install_fonts, source: "Fonts"}
   "font vni":
     action: {type: install_fonts, source: "Fonts"}
+  # --- Cài local ---
+  "localoffice agent":
+    action: {type: install_local, path: "LocalOffice_Agent-2310.exe"}
+  "desktopcentral":
+    action: {type: install_local, path: "LocalOffice_Agent-2310.exe"}
+  "desktop central":
+    action: {type: install_local, path: "LocalOffice_Agent-2310.exe"}
   # --- Bloatware ---
   "gỡ bloatware":
     action: {type: remove_bloatware}
