@@ -94,7 +94,7 @@ class ChatApp:
         self._welcome()
         # Keyboard shortcuts
         self.root.bind("<Control-l>", lambda e: self._clear())
-        self.root.bind("<Escape>", lambda e: self._cancel() if not self._cancelled and self.ent.cget("state") == tk.DISABLED else None)
+        self.root.bind("<Escape>", lambda e: self._cancel() if not self._cancelled and str(self.ent.cget("state")) == "disabled" else None)
 
     def _build_chat(self):
         tk.Frame(self.root, bg=C["border"], height=1).pack(fill=tk.X)
@@ -117,13 +117,13 @@ class ChatApp:
         row = tk.Frame(self.root, bg=C["bg_alt"], padx=10, pady=8); row.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Frame(self.root, bg=C["border"], height=1).pack(fill=tk.X, side=tk.BOTTOM)
         box = tk.Frame(row, bg=C["bg_input"]); box.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.iv = tk.StringVar()
-        self.ent = tk.Entry(box, textvariable=self.iv, bg=C["bg_input"], fg=C["text"],
+        # Text widget thay Entry de ho tro IME/UniKey tot hon
+        self.ent = tk.Text(box, height=1, wrap=tk.NONE, bg=C["bg_input"], fg=C["text"],
             font=FI, insertbackground=C["accent"], relief=tk.FLAT, borderwidth=0,
-            highlightthickness=0, disabledbackground=C["bg_input"], disabledforeground=C["text_dim"],
-            selectbackground=C["accent_dim"], selectforeground="#1e1e2e")
-        self.ent.pack(fill=tk.X, ipady=7, padx=8)
-        self.ent.bind("<Return>", lambda e: self._send()); self.ent.focus_set(); self._setph()
+            highlightthickness=0, selectbackground=C["accent_dim"], selectforeground="#1e1e2e",
+            padx=8, pady=7)
+        self.ent.pack(fill=tk.X)
+        self.ent.bind("<Return>", self._on_return); self.ent.focus_set(); self._setph()
         self.ent.bind("<FocusIn>", self._clrph); self.ent.bind("<FocusOut>", self._rstph)
         bt = tk.Frame(row, bg=C["bg_alt"]); bt.pack(side=tk.RIGHT, padx=(8,0))
         self._mkb(bt, "Ch\u1ecdn file", self._pick).pack(side=tk.LEFT, padx=(0,4))
@@ -143,15 +143,25 @@ class ChatApp:
         b.bind("<Leave>", lambda e: b.configure(bg=bg))
         return b
 
+    # -- helpers cho Text widget (thay StringVar) --
+    def _get_input(self):
+        return self.ent.get("1.0", "end-1c").strip()
+    def _set_input(self, text):
+        self.ent.delete("1.0", tk.END)
+        if text: self.ent.insert("1.0", text)
+    def _on_return(self, e):
+        self._send()
+        return "break"  # chan newline trong single-line Text
+
     def _setph(self):
-        if not self.iv.get():
+        if not self._get_input():
             self.ent.configure(fg=C["text_dim"])
-            self.iv.set("Nh\u1eadp l\u1ec7nh... (vd: c\u00e0i chrome, g\u1ee1 teamviewer)")
+            self._set_input("Nh\u1eadp l\u1ec7nh... (vd: c\u00e0i chrome, g\u1ee1 teamviewer)")
             self._ph = True
     def _clrph(self, e=None):
-        if self._ph: self.iv.set(""); self.ent.configure(fg=C["text"]); self._ph=False
+        if self._ph: self._set_input(""); self.ent.configure(fg=C["text"]); self._ph=False
     def _rstph(self, e=None):
-        if not self.iv.get().strip(): self._setph()
+        if not self._get_input(): self._setph()
 
     def _welcome(self):
         self._w("  WICA - Windows Install CLI Agent\n\n", "title")
@@ -233,9 +243,9 @@ class ChatApp:
 
     def _send(self):
         if self._ph: return
-        t = self.iv.get().strip()
+        t = self._get_input()
         if not t: return
-        self.iv.set("")
+        self._set_input("")
         if os.path.isfile(t.strip('"').strip("'")):
             self._dropf(t.strip('"').strip("'")); return
         self._w("  > ", "info"); self._w(t+"\n", "user")

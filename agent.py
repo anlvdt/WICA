@@ -8,7 +8,7 @@ import json
 import yaml
 import os
 from openai import OpenAI
-from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, deploy_portable, set_progress_callback, _run_cli_command, copy_to_all_users, install_fonts
+from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, deploy_portable, set_progress_callback, _run_cli_command, copy_to_all_users, install_fonts, _is_winget_installed, _is_registry_set, _is_deployed, _are_fonts_installed, _is_copied_to_users
 from fast_commands import parse_fast
 from keystore import get_key
 
@@ -323,6 +323,37 @@ class AntiGravityAgent:
                 return p
         return None
 
+    def _check_skip(self, action: dict) -> str | None:
+        """Kiểm tra action đã hoàn thành chưa. Trả về lý do skip hoặc None."""
+        t = action.get("type", "")
+        if t == "install":
+            pkg = action.get("package", "")
+            pkg_id = self.sw._resolve(pkg)
+            if _is_winget_installed(pkg_id):
+                return f"đã cài rồi"
+        elif t == "system_config":
+            cfg = action.get("config", "")
+            # Timezone check riêng
+            if cfg.startswith("timezone_"):
+                return None  # Luôn chạy timezone (nhanh, khó check)
+            if _is_registry_set(cfg):
+                return f"đã cấu hình"
+        elif t == "deploy_portable":
+            dest = action.get("dest", "")
+            exe = action.get("exe", "")
+            if dest and _is_deployed(dest, exe):
+                return f"đã cài"
+        elif t == "install_fonts":
+            src = self._resolve_local_path(action.get("source", ""))
+            if _are_fonts_installed(src):
+                return f"đã cài font"
+        elif t == "copy_to_all_users":
+            src = self._resolve_local_path(action.get("source", ""))
+            dest_rel = action.get("dest_relative", "")
+            if _is_copied_to_users(src, dest_rel):
+                return f"đã copy"
+        return None
+
     def _execute_action(self, action: dict, from_llm: bool = False) -> str:
         t = action.get("type", "")
         if t == "install":
@@ -504,6 +535,7 @@ class AntiGravityAgent:
         on_output(f"[profile] {pname} -- {len(actions)} bước", "title")
         ok_count = 0
         fail_count = 0
+        skip_count = 0
         def _on_winget_line(line):
             on_output(f"    {line}", "info")
         set_progress_callback(_on_winget_line)
@@ -513,6 +545,14 @@ class AntiGravityAgent:
                     on_output(f"[warn] Đã dừng tại bước {i}/{len(actions)}", "warn")
                     break
                 desc = self._describe_action(action)
+                # --- Skip check ---
+                skip_reason = self._check_skip(action)
+                if skip_reason:
+                    short = self._describe_action_short(action)
+                    on_output(f"  [{i}/{len(actions)}] [skip] {short} -- {skip_reason}", "info")
+                    _audit("PROFILE_SKIP", f"step={i} {action.get('type','')} reason={skip_reason}", "OK")
+                    skip_count += 1
+                    continue
                 on_output(f"  [{i}/{len(actions)}] {desc}", "progress")
                 if action.get("type") == "remove_bloatware":
                     self._remove_bloatware_feedback(on_output)
@@ -531,7 +571,13 @@ class AntiGravityAgent:
                         ok_count += 1
         finally:
             set_progress_callback(None)
-        on_output(f"[ok] Hoàn thành: {pname} ({ok_count} thành công, {fail_count} lỗi)", "ok")
+        summary = f"[ok] Hoàn thành: {pname} ({ok_count} thành công"
+        if skip_count:
+            summary += f", {skip_count} bỏ qua"
+        if fail_count:
+            summary += f", {fail_count} lỗi"
+        summary += ")"
+        on_output(summary, "ok")
 
     @staticmethod
     def _describe_action(action: dict) -> str:

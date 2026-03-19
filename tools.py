@@ -606,6 +606,127 @@ def install_fonts(source_folder: str) -> str:
     return f"[warn] Font: {ok_count} thành công, {fail_count} lỗi (cần quyền Admin)"
 
 
+# --- Pre-check functions (skip-if-already-done) ---
+
+def _is_winget_installed(pkg_id: str) -> bool:
+    """Kiểm tra nhanh package đã cài chưa bằng winget list --id.
+
+    EDR-safe: chỉ gọi winget.exe trực tiếp.
+    Timeout ngắn (15s) vì chỉ cần check, không cài.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["winget", "list", "--id", pkg_id, "-e",
+             "--accept-source-agreements", "--disable-interactivity"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        stdout, _ = proc.communicate(timeout=15)
+        try:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        # winget list trả về bảng có chứa pkg_id nếu đã cài
+        if proc.returncode == 0 and pkg_id.lower() in stdout.lower():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_registry_set(config_name: str) -> bool:
+    """Kiểm tra registry config đã được áp dụng chưa.
+
+    EDR-safe: chỉ dùng winreg (Python stdlib).
+    Chỉ check HKCU (user hiện tại) hoặc HKLM tùy config.
+    """
+    reg_cfg = REGISTRY_CONFIGS.get(config_name)
+    if not reg_cfg:
+        return False
+    hive = reg_cfg["hive"]
+    key_path = reg_cfg["key"]
+    try:
+        if hive == winreg.HKEY_CURRENT_USER:
+            # Check HKCU trực tiếp (user hiện tại)
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                                 winreg.KEY_READ)
+        else:
+            key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
+        all_match = True
+        for value_name, expected, value_type in reg_cfg["values"]:
+            try:
+                actual, _ = winreg.QueryValueEx(key, value_name)
+                if actual != expected:
+                    all_match = False
+                    break
+            except FileNotFoundError:
+                all_match = False
+                break
+        winreg.CloseKey(key)
+        return all_match
+    except (OSError, FileNotFoundError):
+        return False
+
+
+def _is_deployed(dest_folder: str, exe_name: str = "") -> bool:
+    """Kiểm tra app portable đã được deploy chưa.
+
+    Chỉ check folder tồn tại + exe file tồn tại (nếu có).
+    """
+    if not os.path.isdir(dest_folder):
+        return False
+    if exe_name:
+        return os.path.isfile(os.path.join(dest_folder, exe_name))
+    # Folder tồn tại và không rỗng
+    try:
+        return len(os.listdir(dest_folder)) > 0
+    except OSError:
+        return False
+
+
+def _are_fonts_installed(source_folder: str) -> bool:
+    """Kiểm tra font đã được cài chưa.
+
+    Check xem tất cả font files trong source đã có trong Windows\\Fonts chưa.
+    """
+    if not os.path.isdir(source_folder):
+        return False
+    fonts_dir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Fonts")
+    font_exts = {".ttf", ".otf", ".ttc"}
+    try:
+        font_files = [f for f in os.listdir(source_folder)
+                      if os.path.splitext(f)[1].lower() in font_exts]
+    except OSError:
+        return False
+    if not font_files:
+        return True  # Không có font nào cần cài
+    # Kiểm tra tất cả font đã có trong Fonts folder
+    for fname in font_files:
+        if not os.path.isfile(os.path.join(fonts_dir, fname)):
+            return False
+    return True
+
+
+def _is_copied_to_users(source: str, dest_relative: str) -> bool:
+    """Kiểm tra file đã được copy cho tất cả user chưa.
+
+    Chỉ check user hiện tại (nhanh). Nếu user hiện tại đã có → coi như đã copy.
+    """
+    if not os.path.exists(source):
+        return False
+    src_name = os.path.basename(source)
+    user_home = os.path.expanduser("~")
+    dest = os.path.join(user_home, dest_relative, src_name)
+    return os.path.exists(dest)
+
+
 # --- Software Manager ---
 class SoftwareManager:
     """Quản lý phần mềm - chỉ dùng winget + os.startfile."""
