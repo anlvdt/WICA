@@ -82,6 +82,11 @@ class ChatApp:
         self.agent = AntiGravityAgent()
         self._ph = False
         self._cancelled = False
+        # DPI awareness TRƯỚC khi tạo Tk window
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
         self.root = tk.Tk()
         self.root.title("WICA - Windows Install CLI Agent")
         self.root.configure(bg=C["bg"])
@@ -98,11 +103,8 @@ class ChatApp:
         self.root.bind("<Escape>", lambda e: self._cancel() if not self._cancelled and str(self.ent.cget("state")) == "disabled" else None)
 
     def _center_window(self, w, h):
-        """Đặt cửa sổ giữa màn hình, xử lý cả DPI scaling."""
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
+        """Đặt cửa sổ giữa màn hình."""
+        self.root.update_idletasks()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         x = max(0, (sw - w) // 2)
