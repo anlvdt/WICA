@@ -31,10 +31,29 @@ CONFIG_MAP = {
     r"(?:tắt|tat|disable).*(?:bing|bing search)": "disable_bing_search",
     r"(?:tắt|tat|disable).*copilot": "disable_copilot",
     r"(?:menu.*(?:cổ điển|co dien|classic)|classic.*(?:context|menu)|right.?click.*(?:cũ|cu|classic))": "classic_context_menu",
+    r"(?:tắt|tat|disable).*(?:notification|thông báo|thong bao)": "disable_notifications",
+    r"(?:bật|bat|enable).*(?:notification|thông báo|thong bao)": "enable_notifications",
+    r"(?:tắt|tat|disable).*(?:tips|mẹo|meo|gợi ý|goi y)": "disable_tips",
+    r"(?:tắt|tat|disable).*(?:weather|thời tiết|thoi tiet|widget)": "disable_widgets",
+    r"(?:search|tìm kiếm|tim kiem).*(?:icon|biểu tượng|bieu tuong|only)": "search_icon_only",
+    r"(?:ẩn|an|hide|tắt|tat).*(?:search|tìm kiếm|tim kiem).*(?:box|ô|thanh)": "search_hidden",
+    r"(?:tắt|tat|ẩn|an|disable|hide).*(?:task\s*view)": "disable_task_view",
+    r"(?:bật|bat|hiện|hien|enable|show).*(?:task\s*view)": "enable_task_view",
+    r"(?:unpin|gỡ|go|bỏ|bo|xóa|xoa).*(?:store|microsoft store).*(?:taskbar)": "unpin_store_taskbar",
+    r"(?:unpin|gỡ|go|bỏ|bo|xóa|xoa).*(?:taskbar).*(?:store|microsoft store)": "unpin_store_taskbar",
 }
 
 INFO_PATTERNS = [
     r"(?:thông tin|thong tin|info|system info|máy tính|may tinh|cấu hình máy|cau hinh may)",
+]
+
+HOSTNAME_GET_PATTERNS = [
+    r"(?:xem|check|lấy|lay)\s+(?:tên máy|ten may|hostname)",
+    r"(?:tên máy|ten may|hostname)\s*(?:là gì|la gi|hiện tại|hien tai)?$",
+]
+
+HOSTNAME_SET_PATTERNS = [
+    r"(?:đặt|dat|set|đổi|doi|rename)\s+(?:tên máy|ten may|hostname)\s+(.+)",
 ]
 
 LIST_PATTERNS = [
@@ -72,8 +91,30 @@ EXPORT_PATTERNS = [
     r"(?:xu[aấ]t|xuat|export)\s*(?:danh s[aá]ch|danh sach|app|list|ph[aầ]n m[eề]m|phan mem)?",
 ]
 
+# CLI commands - detect khi input bắt đầu bằng tên lệnh trong whitelist
+_CLI_COMMANDS = {
+    # Network
+    "ipconfig", "ping", "tracert", "nslookup", "netstat", "arp",
+    "route", "pathping", "nbtstat", "getmac",
+    # System info
+    "hostname", "whoami", "systeminfo", "ver", "wmic",
+    "tasklist", "taskkill", "sc",
+    # File operations (read-only / safe)
+    "dir", "type", "where", "tree", "attrib", "icacls",
+    "certutil", "cipher",
+    # Winget
+    "winget",
+    # Disk
+    "chkdsk", "diskpart", "fsutil",
+    # Network config
+    "netsh",
+    # Other safe tools
+    "sfc", "dism", "gpresult", "gpupdate",
+    "bcdedit", "shutdown", "tzutil", "reg",
+}
 
-def parse_fast(text: str) -> list[dict] | None:
+
+def parse_fast(text: str, quick_commands: dict = None) -> list[dict] | None:
     """Parse lệnh nhanh. Trả về list actions hoặc None nếu cần LLM."""
     text = text.strip()
     text_lower = text.lower()
@@ -87,6 +128,28 @@ def parse_fast(text: str) -> list[dict] | None:
     for p in CLEAR_PATTERNS:
         if re.search(p, text_lower):
             return [{"type": "clear"}]
+
+    # CLI command - detect khi input bắt đầu bằng lệnh whitelist
+    first_word = text_lower.split()[0].replace(".exe", "") if text_lower.split() else ""
+    if first_word in _CLI_COMMANDS:
+        return [{"type": "cli", "command": text}]
+
+    # Quick commands từ config.yaml (cài teamviewer qs, copy profile vpn, cài font...)
+    if quick_commands:
+        # Bỏ prefix "cài", "cài đặt", "setup", "copy" để match
+        stripped = re.sub(
+            r"^(?:cài đặt|cai dat|cài|cai|setup|copy)\s+", "", text_lower
+        ).strip()
+        for cmd_name, cmd_data in quick_commands.items():
+            if text_lower == cmd_name or stripped == cmd_name:
+                action = cmd_data.get("action", {})
+                if action:
+                    return [action]
+            # Cũng match nếu user gõ "cài <tên>" hoặc "setup <tên>"
+            if stripped == cmd_name.replace("cài ", "").replace("cài đặt ", ""):
+                action = cmd_data.get("action", {})
+                if action:
+                    return [action]
 
     # Setup máy mới = chạy profile mặc định
     for p in SETUP_NEW_PATTERNS:
@@ -108,6 +171,17 @@ def parse_fast(text: str) -> list[dict] | None:
     for p in INFO_PATTERNS:
         if re.search(p, text_lower):
             return [{"type": "system_info"}]
+
+    # Hostname get
+    for p in HOSTNAME_GET_PATTERNS:
+        if re.search(p, text_lower):
+            return [{"type": "get_hostname"}]
+
+    # Hostname set
+    for p in HOSTNAME_SET_PATTERNS:
+        m = re.search(p, text_lower)
+        if m:
+            return [{"type": "set_hostname", "name": m.group(1).strip()}]
 
     # List installed
     for p in LIST_PATTERNS:

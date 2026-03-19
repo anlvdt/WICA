@@ -174,6 +174,16 @@ class ChatApp:
             ("xo\u00e1 m\u00e0n h\u00ecnh", "X\u00f3a n\u1ed9i dung chat (Ctrl+L)"),
         ]:
             self._w(f"    {c}", "cmd"); self._w(f"  -- {d}\n", "info")
+        self._w("\n  L\u1ec7nh CLI tr\u1ef1c ti\u1ebfp (kh\u00f4ng c\u1ea7n m\u1edf terminal):\n\n", "title")
+        for c, d in [
+            ("ipconfig", "Xem c\u1ea5u h\u00ecnh m\u1ea1ng"),
+            ("ping 8.8.8.8", "Ki\u1ec3m tra k\u1ebft n\u1ed1i m\u1ea1ng"),
+            ("netstat -an", "Xem c\u00e1c k\u1ebft n\u1ed1i \u0111ang m\u1edf"),
+            ("tasklist", "Xem ti\u1ebfn tr\u00ecnh \u0111ang ch\u1ea1y"),
+            ("systeminfo", "Th\u00f4ng tin h\u1ec7 th\u1ed1ng chi ti\u1ebft"),
+            ("whoami", "Xem user hi\u1ec7n t\u1ea1i"),
+        ]:
+            self._w(f"    {c}", "cmd"); self._w(f"  -- {d}\n", "info")
         self._w("\n  K\u00e9o th\u1ea3 file .exe/.msi v\u00e0o chat ho\u1eb7c nh\u1ea5n [Ch\u1ecdn file]\n", "file")
         self._w("  "+"-"*52+"\n\n", "divider")
 
@@ -194,6 +204,9 @@ class ChatApp:
             elif t == "help":
                 self.root.after(0, self._clear)
             return
+        # CLI output hiển thị monospace
+        if tag == "cli_output":
+            tag = "cmd"
         self.root.after(0, self._out, t, tag)
 
     def _busy(self, on):

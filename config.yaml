@@ -76,7 +76,11 @@ aliases:
   "office 365": "Microsoft.Office"
   "office365": "Microsoft.Office"
   "microsoft 365": "Microsoft.Office"
+  "edge webview2": "Microsoft.EdgeWebView2Runtime"
+  "webview2": "Microsoft.EdgeWebView2Runtime"
   "m365": "Microsoft.Office"
+  teams: "Microsoft.Teams"
+  "microsoft teams": "Microsoft.Teams"
 
 # Thư mục chứa file cài đặt local (thử lần lượt, dùng cái nào tồn tại)
 local_paths:
@@ -139,13 +143,106 @@ profiles:
       - {type: install, package: "vc++ x64"}
       - {type: install, package: "vc++ x86"}
       - {type: install, package: citrix}
+      - {type: install, package: "edge webview2"}
       - {type: install, package: connecttunnel}
+      # --- Copy SonicWall VPN profile cho tất cả user ---
+      - {type: copy_to_all_users, source: "profiles.xml", dest_relative: "AppData\\Local\\SonicWall\\SnwlConnect\\Documents"}
       - {type: install, package: "office 365"}
       # --- Cài từ file local (không có trên winget) ---
       - {type: install_local, path: "Desktopcentral\\LocalOffice_Agent-2310.exe"}
+      # --- Cài font VNI cho tất cả user ---
+      - {type: install_fonts, source: "Fonts"}
       # --- Cấu hình hệ thống ---
       - {type: system_config, config: timezone_SE_Asia_Standard_Time}
       - {type: system_config, config: date_dmy}
       - {type: system_config, config: show_file_ext}
+      - {type: system_config, config: disable_widgets}
+      - {type: system_config, config: disable_task_view}
+      - {type: system_config, config: search_icon_only}
+      - {type: system_config, config: unpin_store_taskbar}
+      - {type: system_config, config: disable_notifications}
+      - {type: system_config, config: disable_tips}
+      - {type: system_config, config: disable_bing_search}
+      - {type: system_config, config: disable_copilot}
+      - {type: system_config, config: classic_context_menu}
+      # --- Cài Teams ---
+      - {type: install, package: teams}
       # --- Bật lại UAC ---
       - {type: system_config, config: uac_on}
+
+# === Quick Commands - Lệnh nhanh riêng lẻ ===
+# Gõ tên lệnh trong chat để chạy action tương ứng.
+# Không cần chạy cả profile, chỉ chạy 1 bước.
+quick_commands:
+  # --- Deploy portable ---
+  "teamviewer qs":
+    action: {type: deploy_portable, source: "TeamViewerQS_x64.exe", dest: "C:\\Tools\\TeamViewerQS", name: "TeamViewer QS"}
+  "unikey":
+    action: {type: deploy_portable, source: "unikey46RC2-230919-win64", dest: "C:\\Tools\\UniKey", name: "UniKey", exe: "UniKeyNT.exe"}
+  # --- Copy files ---
+  "copy profile vpn":
+    action: {type: copy_to_all_users, source: "profiles.xml", dest_relative: "AppData\\Local\\SonicWall\\SnwlConnect\\Documents"}
+  "copy profile sonicwall":
+    action: {type: copy_to_all_users, source: "profiles.xml", dest_relative: "AppData\\Local\\SonicWall\\SnwlConnect\\Documents"}
+  # --- Font ---
+  "cài font":
+    action: {type: install_fonts, source: "Fonts"}
+  "cài font vni":
+    action: {type: install_fonts, source: "Fonts"}
+  "font vni":
+    action: {type: install_fonts, source: "Fonts"}
+  # --- Bloatware ---
+  "gỡ bloatware":
+    action: {type: remove_bloatware}
+  "bloatware":
+    action: {type: remove_bloatware}
+  # --- Cấu hình taskbar ---
+  "tắt widget":
+    action: {type: system_config, config: disable_widgets}
+  "tắt weather":
+    action: {type: system_config, config: disable_widgets}
+  "tắt task view":
+    action: {type: system_config, config: disable_task_view}
+  "search icon":
+    action: {type: system_config, config: search_icon_only}
+  "unpin store":
+    action: {type: system_config, config: unpin_store_taskbar}
+  "gỡ store taskbar":
+    action: {type: system_config, config: unpin_store_taskbar}
+  # --- Cấu hình hệ thống ---
+  "tắt thông báo":
+    action: {type: system_config, config: disable_notifications}
+  "tắt tips":
+    action: {type: system_config, config: disable_tips}
+  "tắt gợi ý":
+    action: {type: system_config, config: disable_tips}
+  "tắt bing":
+    action: {type: system_config, config: disable_bing_search}
+  "tắt copilot":
+    action: {type: system_config, config: disable_copilot}
+  "menu cổ điển":
+    action: {type: system_config, config: classic_context_menu}
+  "classic menu":
+    action: {type: system_config, config: classic_context_menu}
+  "tắt uac":
+    action: {type: system_config, config: uac_off}
+  "bật uac":
+    action: {type: system_config, config: uac_on}
+  "dark mode":
+    action: {type: system_config, config: dark_mode}
+  "light mode":
+    action: {type: system_config, config: light_mode}
+  "hiện đuôi file":
+    action: {type: system_config, config: show_file_ext}
+  "hiện file ẩn":
+    action: {type: system_config, config: show_hidden_files}
+  "taskbar trái":
+    action: {type: system_config, config: taskbar_left}
+  "taskbar giữa":
+    action: {type: system_config, config: taskbar_center}
+  "ngày dd/mm/yyyy":
+    action: {type: system_config, config: date_dmy}
+  "định dạng ngày":
+    action: {type: system_config, config: date_dmy}
+  "tắt telemetry":
+    action: {type: system_config, config: disable_telemetry}

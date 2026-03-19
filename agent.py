@@ -8,8 +8,9 @@ import json
 import yaml
 import os
 from openai import OpenAI
-from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, deploy_portable, set_progress_callback
+from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, deploy_portable, set_progress_callback, _run_cli_command, copy_to_all_users, install_fonts
 from fast_commands import parse_fast
+from keystore import get_key
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
 MAX_HISTORY = 20
@@ -68,7 +69,7 @@ class AntiGravityAgent:
         self.provider_name = None
         self._connect_llm()
         self._cancelled = False
-        self.sw = SoftwareManager(self.aliases)
+        self.sw = SoftwareManager(self.aliases, self.local_paths)
         self.sys_cfg = SystemConfigurator()
         self.history = [
             {"role": "system", "content": SYSTEM_PROMPT.format(
@@ -78,12 +79,58 @@ class AntiGravityAgent:
         ]
 
     def _resolve_api_key(self, raw_key: str) -> str:
-        """Resolve API key: nếu bắt đầu bằng 'env:' thì đọc từ biến môi trường."""
+        """Resolve API key: nếu bắt đầu bằng 'env:' thì đọc từ biến môi trường.
+        
+        Khi chạy Run as Admin/different user, env var của user gốc không có.
+        Fallback: đọc trực tiếp từ registry HKCU\\Environment của user gốc.
+        """
         if not raw_key:
             return ""
         if raw_key.startswith("env:"):
             env_name = raw_key[4:]
-            return os.environ.get(env_name, "")
+            # Thử env var trước (hoạt động khi chạy bình thường)
+            val = os.environ.get(env_name, "")
+            if val:
+                return val
+            # Fallback: đọc từ registry user environment
+            # (hoạt động khi Run as Admin/different user)
+            try:
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                    r"Environment") as key:
+                    val, _ = winreg.QueryValueEx(key, env_name)
+                    if val:
+                        return val
+            except (OSError, FileNotFoundError):
+                pass
+            # Fallback 2: thử HKEY_USERS với SID của user đang login
+            try:
+                import winreg
+                import ctypes
+                # Lấy tất cả SID trong HKEY_USERS
+                i = 0
+                while True:
+                    try:
+                        sid = winreg.EnumKey(winreg.HKEY_USERS, i)
+                        if sid.startswith("S-1-5-21") and not sid.endswith("_Classes"):
+                            try:
+                                with winreg.OpenKey(winreg.HKEY_USERS,
+                                                    f"{sid}\\Environment") as key:
+                                    val, _ = winreg.QueryValueEx(key, env_name)
+                                    if val:
+                                        return val
+                            except (OSError, FileNotFoundError):
+                                pass
+                        i += 1
+                    except OSError:
+                        break
+            except Exception:
+                pass
+            # Fallback 3: đọc từ file .keys (mã hóa, đi kèm USB/ZIP)
+            val = get_key(env_name)
+            if val:
+                return val
+            return ""
         return raw_key
 
     def _connect_llm(self):
@@ -207,6 +254,10 @@ class AntiGravityAgent:
             return self.sys_cfg.apply(action.get("config", ""))
         elif t == "system_info":
             return self.sys_cfg.get_system_info()
+        elif t == "get_hostname":
+            return self.sys_cfg.get_hostname()
+        elif t == "set_hostname":
+            return self.sys_cfg.set_hostname(action.get("name", ""))
         elif t == "upgrade_all":
             return self.sw.upgrade_all()
         elif t == "export_apps":
@@ -241,6 +292,21 @@ class AntiGravityAgent:
             return self._list_profiles()
         elif t == "run_profile":
             return self._run_profile_sync(action.get("name", ""))
+        elif t == "cli":
+            return _run_cli_command(action.get("command", ""))
+        elif t == "copy_to_all_users":
+            source = self._resolve_local_path(action.get("source", ""))
+            dest_rel = action.get("dest_relative", "")
+            if from_llm and not self._is_safe_path(source):
+                _audit("PATH_BLOCKED", f"unsafe copy source from LLM: {source}", "FAIL")
+                return f"[error] Đường dẫn không được phép: {source}"
+            return copy_to_all_users(source, dest_rel)
+        elif t == "install_fonts":
+            source = self._resolve_local_path(action.get("source", ""))
+            if from_llm and not self._is_safe_path(source):
+                _audit("PATH_BLOCKED", f"unsafe font source from LLM: {source}", "FAIL")
+                return f"[error] Đường dẫn không được phép: {source}"
+            return install_fonts(source)
         return ""
 
     def _list_profiles(self) -> str:
@@ -280,6 +346,17 @@ class AntiGravityAgent:
                 "disable_bing_search": "Tắt Bing trong Start Menu",
                 "disable_copilot": "Tắt Copilot",
                 "classic_context_menu": "Menu chuột phải cổ điển",
+                "disable_notifications": "Tắt Notification Center",
+                "enable_notifications": "Bật Notification Center",
+                "disable_tips": "Tắt Tips/Gợi ý Windows",
+                "disable_weather": "Tắt Weather trên taskbar",
+                "disable_widgets": "Tắt Widgets trên taskbar",
+                "search_icon_only": "Search chỉ hiện icon",
+                "search_hidden": "Ẩn Search trên taskbar",
+                "search_box": "Hiện ô Search trên taskbar",
+                "disable_task_view": "Tắt Task View",
+                "enable_task_view": "Bật Task View",
+                "unpin_store_taskbar": "Gỡ Store khỏi taskbar",
             }
             if cfg.startswith("timezone_"):
                 tz = cfg.replace("timezone_", "").replace("_", " ")
@@ -295,6 +372,16 @@ class AntiGravityAgent:
             return "Cập nhật tất cả phần mềm"
         elif t == "export_apps":
             return "Xuất danh sách phần mềm"
+        elif t == "cli":
+            return f"Chạy lệnh: {action.get('command', '')}"
+        elif t == "copy_to_all_users":
+            return f"Copy {os.path.basename(action.get('source', ''))} cho tất cả user"
+        elif t == "install_fonts":
+            return f"Cài font từ {os.path.basename(action.get('source', ''))}"
+        elif t == "get_hostname":
+            return "Xem tên máy"
+        elif t == "set_hostname":
+            return f"Đặt tên máy: {action.get('name', '')}"
         return t
 
     def _run_profile_sync(self, name: str) -> str:
@@ -367,11 +454,16 @@ class AntiGravityAgent:
             "list_installed": "[list] Đang lấy danh sách phần mềm...",
             "system_config": f"[config] Đang áp dụng: {action.get('config', '')}...",
             "system_info": "[info] Đang lấy thông tin hệ thống...",
+            "get_hostname": "[info] Đang lấy tên máy...",
+            "set_hostname": f"[...] Đang đặt tên máy: {action.get('name', '')}...",
             "create_shortcut": f"[...] Đang tạo shortcut: {action.get('name', '')}...",
             "deploy_portable": f"[...] Đang cài portable: {action.get('name', '')}...",
             "remove_bloatware": "[...] Đang gỡ bloatware...",
             "upgrade_all": "[...] Đang cập nhật tất cả phần mềm...",
             "export_apps": "[...] Đang xuất danh sách phần mềm...",
+            "cli": f"[>] {action.get('command', '')}",
+            "copy_to_all_users": f"[...] Đang copy {os.path.basename(action.get('source', ''))} cho tất cả user...",
+            "install_fonts": f"[...] Đang cài font...",
         }
         return descs.get(t, "")
 
@@ -412,7 +504,7 @@ class AntiGravityAgent:
     def chat_with_feedback(self, user_input: str, on_output):
         self._cancelled = False
         # === FAST PATH ===
-        fast_actions = parse_fast(user_input)
+        fast_actions = parse_fast(user_input, self.config.get("quick_commands"))
         if fast_actions is not None:
             _audit("FAST_PATH", f"input={user_input[:80]}", "OK")
             # Bật progress callback cho cả lệnh đơn lẻ
@@ -435,6 +527,13 @@ class AntiGravityAgent:
                         continue
                     if atype == "list_profiles":
                         on_output(self._list_profiles(), "info")
+                        continue
+                    if atype == "cli":
+                        cmd = action.get("command", "")
+                        on_output(f"[>] {cmd}", "progress")
+                        result = _run_cli_command(cmd)
+                        tag = "fail" if "[error]" in result else "cli_output"
+                        on_output(result, tag)
                         continue
                     desc = self._describe_action(action)
                     if desc:

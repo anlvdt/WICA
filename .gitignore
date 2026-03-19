@@ -26,6 +26,7 @@ Desktop.ini
 
 # Sensitive - KHÔNG commit API keys
 .env
+.keys
 
 # Debug/temp files
 _debug_*

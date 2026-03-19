@@ -14,6 +14,61 @@ DIST_DIR = "dist"
 APP_NAME = "WICA"
 USB_DIR = os.path.join(DIST_DIR, f"{APP_NAME}-USB")
 
+# API keys can lay tu env var luc build, ma hoa vao file .keys
+_KEY_NAMES = ["GROQ_API_KEY", "NVIDIA_API_KEY"]
+
+
+def _create_keyfile(dest_dir: str):
+    """Doc API key tu env var hoac registry, ma hoa va luu vao .keys."""
+    keys = {}
+    for name in _KEY_NAMES:
+        # Thu env var truoc
+        val = os.environ.get(name, "")
+        # Fallback: doc tu registry HKCU\Environment
+        if not val:
+            try:
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+                    val, _ = winreg.QueryValueEx(key, name)
+            except Exception:
+                pass
+        # Fallback 2: HKEY_USERS\{SID}\Environment
+        if not val:
+            try:
+                import winreg
+                i = 0
+                while True:
+                    try:
+                        sid = winreg.EnumKey(winreg.HKEY_USERS, i)
+                        if sid.startswith("S-1-5-21") and not sid.endswith("_Classes"):
+                            try:
+                                with winreg.OpenKey(winreg.HKEY_USERS,
+                                                    f"{sid}\\Environment") as key:
+                                    val, _ = winreg.QueryValueEx(key, name)
+                                    if val:
+                                        break
+                            except (OSError, FileNotFoundError):
+                                pass
+                        i += 1
+                    except OSError:
+                        break
+            except Exception:
+                pass
+        if val:
+            keys[name] = val
+            print(f"  [key] {name} -> da ma hoa vao .keys")
+    if keys:
+        raw = __import__("json").dumps(keys, ensure_ascii=False).encode("utf-8")
+        import base64
+        salt = b"W1CA_AnT1Gr4v1tY_2026!"
+        encrypted = base64.b64encode(bytes(d ^ salt[i % len(salt)] for i, d in enumerate(raw)))
+        keyfile = os.path.join(dest_dir, ".keys")
+        with open(keyfile, "wb") as f:
+            f.write(encrypted)
+        print(f"  [key] File .keys da tao: {keyfile}")
+    else:
+        print("  [key] Khong tim thay API key trong env var hoac registry")
+
 
 def build():
     print(f"[build] Dang build {APP_NAME} portable...")
@@ -28,6 +83,7 @@ def build():
         "--hidden-import", "yaml",
         "--hidden-import", "openai",
         "--hidden-import", "win32com.client",
+        "--hidden-import", "keystore",
         "--windowed",
         "main.py"
     ], check=True)
@@ -45,11 +101,25 @@ def build():
         print(f"[error] Khong tim thay: {src_folder}")
         return
 
-    # Copy config
+    # Copy config (giu nguyen env:xxx placeholder - app tu doc tu registry)
     shutil.copy2("config.yaml", os.path.join(USB_DIR, APP_NAME))
+
+    # Ma hoa API key vao file .keys (an, khong doc duoc bang mat)
+    app_dir = os.path.join(USB_DIR, APP_NAME)
+    _create_keyfile(app_dir)
+    # Cung tao trong dist/WICA/_internal/ (PyInstaller working dir)
+    internal_dir = os.path.join(src_folder, "_internal")
+    if os.path.isdir(internal_dir):
+        _create_keyfile(internal_dir)
 
     # Tao thu muc logs
     os.makedirs(os.path.join(USB_DIR, APP_NAME, "logs"), exist_ok=True)
+
+    # Tao file .zip de de copy qua mang
+    zip_path = os.path.join(DIST_DIR, f"{APP_NAME}-Portable")
+    shutil.make_archive(zip_path, "zip", USB_DIR)
+    zip_file = zip_path + ".zip"
+    zip_size = os.path.getsize(zip_file) / (1024 * 1024)
 
     print(f"\n[ok] Portable build: {USB_DIR}/")
     print(f"  {APP_NAME}-USB/")
@@ -57,8 +127,9 @@ def build():
     print(f"      +-- {APP_NAME}.exe   (Chay truc tiep)")
     print(f"      +-- config.yaml      (Cau hinh)")
     print(f"      +-- logs/            (Audit log)")
-    print(f"\nCopy thu muc {APP_NAME}-USB vao USB de su dung.")
-    print(f"Chay {APP_NAME}.exe truc tiep, khong can cai dat.")
+    print(f"\n[ok] ZIP: {zip_file} ({zip_size:.1f} MB)")
+    print(f"\nCopy file .zip hoac thu muc {APP_NAME}-USB vao USB de su dung.")
+    print(f"Giai nen zip, chay {APP_NAME}.exe truc tiep, khong can cai dat.")
 
 
 if __name__ == "__main__":
