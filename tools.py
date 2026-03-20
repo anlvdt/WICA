@@ -627,6 +627,33 @@ def create_shortcut(target: str, shortcut_name: str, desktop: str = "public") ->
         return f"[error] Lỗi tạo shortcut: {e}"
 
 
+# --- Progress emit helper ---
+def _emit_progress(msg: str):
+    """Gửi thông báo progress qua callback (nếu có)."""
+    with _cb_lock:
+        cb = _progress_callback
+    if cb:
+        cb(msg)
+
+
+def _copytree_progress(src: str, dst: str, label: str = ""):
+    """copytree với progress emit từng file.
+
+    Thay thế shutil.copytree để UI không im lặng khi copy folder lớn.
+    """
+    os.makedirs(dst, exist_ok=True)
+    entries = list(os.scandir(src))
+    total = len(entries)
+    for i, entry in enumerate(entries, 1):
+        src_path = entry.path
+        dst_path = os.path.join(dst, entry.name)
+        if entry.is_dir(follow_symlinks=False):
+            _copytree_progress(src_path, dst_path, label)
+        else:
+            shutil.copy2(src_path, dst_path)
+            _emit_progress(f"  [{i}/{total}] {label}{entry.name}")
+
+
 # --- Deploy portable app (copy + shortcut, EDR-safe) ---
 def deploy_portable(source: str, dest_folder: str, shortcut_name: str,
                     exe_name: str = "", desktop: str = "public") -> str:
@@ -649,10 +676,12 @@ def deploy_portable(source: str, dest_folder: str, shortcut_name: str,
     if os.path.isdir(source):
         # Copy cả folder
         try:
+            _emit_progress(f"Đang copy {os.path.basename(source)} → {dest_folder} ...")
             if os.path.exists(dest_folder):
                 shutil.rmtree(dest_folder)
-            shutil.copytree(source, dest_folder)
+            _copytree_progress(source, dest_folder, label="")
             _audit("DEPLOY_COPY", f"folder {source} -> {dest_folder}", "OK")
+            _emit_progress(f"[ok] Copy xong: {dest_folder}")
         except PermissionError:
             _audit("DEPLOY_COPY", "permission denied", "FAIL")
             return f"[error] Cần quyền Administrator để copy vào {dest_folder}"
@@ -664,9 +693,12 @@ def deploy_portable(source: str, dest_folder: str, shortcut_name: str,
         # Copy file đơn
         try:
             os.makedirs(dest_folder, exist_ok=True)
-            dest_file = os.path.join(dest_folder, os.path.basename(source))
+            fname = os.path.basename(source)
+            _emit_progress(f"Đang copy {fname} → {dest_folder} ...")
+            dest_file = os.path.join(dest_folder, fname)
             shutil.copy2(source, dest_file)
             _audit("DEPLOY_COPY", f"file {source} -> {dest_file}", "OK")
+            _emit_progress(f"[ok] Copy xong: {dest_file}")
             target_exe = dest_file
         except PermissionError:
             _audit("DEPLOY_COPY", "permission denied", "FAIL")
@@ -740,20 +772,26 @@ def copy_to_all_users(source: str, dest_relative: str) -> str:
     is_dir = os.path.isdir(source)
     src_name = os.path.basename(source)
 
-    for udir in user_dirs:
+    _emit_progress(f"Đang copy {src_name} cho {len(user_dirs)} user profile...")
+
+    for idx, udir in enumerate(user_dirs, 1):
+        uname = os.path.basename(udir)
         dest_dir = os.path.join(udir, dest_relative)
+        _emit_progress(f"  [{idx}/{len(user_dirs)}] {uname} ...")
         try:
             os.makedirs(dest_dir, exist_ok=True)
             if is_dir:
                 dest_full = os.path.join(dest_dir, src_name)
                 if os.path.exists(dest_full):
                     shutil.rmtree(dest_full)
-                shutil.copytree(source, dest_full)
+                _copytree_progress(source, dest_full, label=f"{uname}/")
             else:
                 shutil.copy2(source, os.path.join(dest_dir, src_name))
             ok_count += 1
+            _emit_progress(f"  [ok] {uname}")
         except Exception as e:
             fail_count += 1
+            _emit_progress(f"  [lỗi] {uname}: {e}")
             _audit("COPY_ALL_USERS", f"{udir}: {e}", "FAIL")
 
     _audit("COPY_ALL_USERS_RESULT", f"ok={ok_count} fail={fail_count}",
@@ -796,9 +834,12 @@ def install_fonts(source_folder: str) -> str:
     if not font_files:
         return f"[info] Không tìm thấy file font (.ttf/.otf/.ttc) trong {source_folder}"
 
-    for fname in font_files:
+    _emit_progress(f"Đang cài {len(font_files)} font vào {fonts_dir} ...")
+
+    for i, fname in enumerate(font_files, 1):
         src = os.path.join(source_folder, fname)
         dest = os.path.join(fonts_dir, fname)
+        _emit_progress(f"  [{i}/{len(font_files)}] {fname}")
         try:
             shutil.copy2(src, dest)
             # Đăng ký font trong registry (HKLM = all users)
