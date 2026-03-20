@@ -1069,7 +1069,7 @@ class SoftwareManager:
     def _resolve(self, name: str) -> str:
         return self.aliases.get(name.lower().strip(), name)
 
-    def _try_local_fallback(self, pkg_id: str) -> str:
+    def _try_local_fallback(self, pkg_id: str, prefer_local: bool = False) -> str:
         """Tìm installer local cho package khi winget fail.
         
         Tìm trong local_paths các file setup phổ biến.
@@ -1085,7 +1085,7 @@ class SoftwareManager:
             for fname in filenames:
                 full = os.path.join(base_dir, fname)
                 if os.path.isfile(full):
-                    return self._open_local_installer(full)
+                    return self._open_local_installer(full, prefer_local=prefer_local)
             # Tìm trong subfolder chứa "office" hoặc "365"
             try:
                 for entry in os.listdir(base_dir):
@@ -1096,20 +1096,23 @@ class SoftwareManager:
                             for fname in filenames:
                                 full = os.path.join(sub, fname)
                                 if os.path.isfile(full):
-                                    return self._open_local_installer(full)
+                                    return self._open_local_installer(full, prefer_local=prefer_local)
                         elif os.path.isfile(sub) and entry_lower.endswith((".exe", ".msi")):
-                            return self._open_local_installer(sub)
+                            return self._open_local_installer(sub, prefer_local=prefer_local)
             except OSError:
                 pass
         return ""
 
-    def _open_local_installer(self, path: str) -> str:
+    def _open_local_installer(self, path: str, prefer_local: bool = False) -> str:
         """Mở installer bằng os.startfile() - EDR-safe."""
         fname = os.path.basename(path)
         _audit("LOCAL_FALLBACK", f"opening {path}")
         try:
             os.startfile(path)
             _audit("LOCAL_FALLBACK_RESULT", f"opened {fname}", "OK")
+            if prefer_local:
+                return (f"[ok] Đã mở installer local: {fname}\n"
+                        f"Cửa sổ cài đặt sẽ hiện lên, bạn thao tác bình thường.")
             return (f"[ok] Winget không khả dụng, đã mở installer local: {fname}\n"
                     f"Cửa sổ cài đặt sẽ hiện lên, bạn thao tác bình thường.")
         except OSError as e:
@@ -1167,6 +1170,10 @@ class SoftwareManager:
         _emit("  Winget source sẵn sàng.")
         self._source_ready = True
 
+    # Các package dùng bootstrapper/ClickToRun — winget spawn child process
+    # có console window riêng không thể ẩn. Ưu tiên local installer nếu có.
+    _PREFER_LOCAL = {"Microsoft.Office", "Microsoft365"}
+
     def install(self, package: str) -> str:
         """Cài qua winget - Microsoft-signed, EDR trusted."""
         pkg_id = self._resolve(package)
@@ -1176,6 +1183,15 @@ class SoftwareManager:
             cb = _progress_callback
         if cb:
             cb(f"Đang kết nối winget để cài {package}...")
+
+        # Ưu tiên local installer cho Office/bootstrapper (tránh console đen)
+        if pkg_id in self._PREFER_LOCAL:
+            local = self._try_local_fallback(pkg_id, prefer_local=True)
+            if local:
+                return local
+            # Không có local → winget, nhưng cảnh báo trước
+            if cb:
+                cb(f"[warn] Office sẽ mở cửa sổ console đen trong quá trình cài (~30 phút). Đây là bình thường.")
         args = [
             "install", "--id", pkg_id,
             "--accept-package-agreements",
