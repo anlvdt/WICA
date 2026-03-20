@@ -918,11 +918,81 @@ class ChatApp:
                     self._clear()
             elif tag == "set_status":
                 self._set_status(t)
+            elif tag == "_profile_retry":
+                self._show_retry_button(t["failed"], t["profile"])
             else:
                 self._out(t, tag)
         except queue.Empty:
             pass
         self.root.after(50, self._poll_output)
+
+    def _show_retry_button(self, failed_actions: list, profile_name: str):
+        """Hiện nút Retry inline trong chat cho các task thất bại."""
+        # Frame chứa danh sách lỗi + nút retry
+        frame = tk.Frame(self.chat.text, bg=C["bg"], pady=4)
+
+        # Danh sách task lỗi
+        for desc, _ in failed_actions:
+            lbl = tk.Label(frame, text=f"  ✗ {desc}",
+                           bg=C["bg"], fg=C.get("fail", "#ff6b6b"),
+                           font=("Consolas", 11), anchor="w", justify="left")
+            lbl.pack(fill="x", padx=8)
+
+        # Nút retry
+        btn = tk.Button(
+            frame,
+            text=f"  ↺  Thử lại {len(failed_actions)} bước lỗi  ",
+            bg=C.get("warn", "#fab387"), fg="#1e1e2e",
+            font=("Segoe UI", 11, "bold"),
+            relief="flat", cursor="hand2", padx=12, pady=6,
+            command=lambda: self._do_retry(failed_actions, profile_name, frame),
+        )
+        btn.pack(anchor="w", padx=8, pady=(4, 2))
+
+        self.chat.text.configure(state=tk.NORMAL)
+        self.chat.text.insert(tk.END, "\n")
+        self.chat.text.window_create(tk.END, window=frame)
+        self.chat.text.insert(tk.END, "\n")
+        self.chat.text.configure(state=tk.DISABLED)
+        if self._auto_scroll:
+            self.chat.see(tk.END)
+
+    def _do_retry(self, failed_actions: list, profile_name: str, frame: tk.Frame):
+        """Chạy retry trong background thread, xóa nút retry trước khi chạy."""
+        # Xóa frame retry khỏi chat
+        try:
+            self.chat.text.configure(state=tk.NORMAL)
+            idx = self.chat.text.index(frame)
+            self.chat.text.delete(f"{idx} - 1c", f"{idx} + 1c")
+            frame.destroy()
+            self.chat.text.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+        self._w(f"  > retry {profile_name}\n", "user")
+        self._busy(True)
+        threading.Thread(
+            target=self._exec_retry,
+            args=(failed_actions, profile_name),
+            daemon=True,
+        ).start()
+
+    def _exec_retry(self, failed_actions: list, profile_name: str):
+        self.root.after(0, self._start_spinner, "Đang retry...")
+        try:
+            self.agent._retry_failed_actions(
+                failed_actions, profile_name, self._out_s, self._schedule_raise
+            )
+        except Exception as e:
+            self._out_s(f"[error] {e}", "fail")
+        self.root.after(0, self._stop_spinner)
+        self.root.after(0, self._w, "  " + "-" * 52 + "\n", "divider")
+        self.root.after(0, self._busy, False)
+        self.root.after(100, self._raise_window)
+        if self._notify_sound:
+            try:
+                ctypes.windll.user32.MessageBeep(0x00000040)
+            except Exception:
+                pass
 
     def _init_ime(self):
         """Gọi ImmAssociateContextEx sau khi Tk window đã render xong.

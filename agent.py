@@ -1101,6 +1101,7 @@ class AntiGravityAgent:
         fail_count = 0
         skip_count = 0
         run_num = 0
+        failed_actions = []  # Thu thập action thất bại để offer retry
         def _on_winget_line(line):
             on_output(f"    {line}", "info")
         set_progress_callback(_on_winget_line)
@@ -1135,6 +1136,7 @@ class AntiGravityAgent:
                     elif "[error]" in result:
                         on_output(f"  {result}", "fail")
                         fail_count += 1
+                        failed_actions.append((desc, action))
                     else:
                         on_output(f"  {result}", "result")
                         ok_count += 1
@@ -1146,7 +1148,50 @@ class AntiGravityAgent:
         if fail_count:
             summary += f", {fail_count} lỗi"
         summary += ")"
-        on_output(summary, "ok")
+        on_output(summary, "ok" if fail_count == 0 else "warn")
+        # Notify UI về failed tasks để hiện nút retry
+        if failed_actions:
+            on_output({"failed": failed_actions, "profile": pname}, "_profile_retry")
+
+    def _retry_failed_actions(self, failed_actions: list, profile_name: str, on_output, on_raise=None):
+        """Chạy lại các action đã thất bại từ profile trước."""
+        _audit("PROFILE_RETRY", f"profile={profile_name} count={len(failed_actions)}", "OK")
+        on_output(f"[retry] Thử lại {len(failed_actions)} bước lỗi...", "title")
+        ok_count = 0
+        fail_count = 0
+        still_failed = []
+
+        def _on_winget_line(line):
+            on_output(f"    {line}", "info")
+        set_progress_callback(_on_winget_line)
+        try:
+            for i, (desc, action) in enumerate(failed_actions, 1):
+                if self._cancelled:
+                    on_output("[warn] Đã dừng retry.", "warn")
+                    break
+                if i > 1:
+                    import time; time.sleep(1.0)
+                on_output(f"  [{i}/{len(failed_actions)}] {desc}", "progress")
+                result = self._execute_action(action)
+                if result:
+                    if "[ok]" in result or "[info]" in result:
+                        on_output(f"  {result}", "ok")
+                        ok_count += 1
+                    elif "[error]" in result:
+                        on_output(f"  {result}", "fail")
+                        fail_count += 1
+                        still_failed.append((desc, action))
+                    else:
+                        on_output(f"  {result}", "result")
+                        ok_count += 1
+        finally:
+            set_progress_callback(None)
+
+        if fail_count == 0:
+            on_output(f"[ok] Retry xong: tất cả {ok_count} bước đã thành công.", "ok")
+        else:
+            on_output(f"[warn] Retry: {ok_count} thành công, {fail_count} vẫn lỗi", "warn")
+            on_output({"failed": still_failed, "profile": profile_name}, "_profile_retry")
 
     @staticmethod
     def _describe_action_progress(action: dict) -> str:
