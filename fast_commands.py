@@ -12,7 +12,7 @@ INSTALL_PATTERNS = [
 ]
 
 UNINSTALL_PATTERNS = [
-    r"(?:gỡ cài đặt|go cai dat|gỡ cài|go cai|gỡ bỏ|go bo|gỡ|go|gõ|uninstall|remove|xóa|xoa)\s+(.+)",
+    r"(?:gỡ cài đặt|go cai dat|gỡ cài|go cai|gỡ bỏ|go bo|gỡ|go|uninstall|remove|xóa|xoa)\s+(.+)",
 ]
 
 SEARCH_PATTERNS = [
@@ -121,8 +121,8 @@ DIAGNOSTIC_PATTERNS = {
     ],
     # Kiểm tra ổ đĩa / disk
     r"(?:ki[eể]m tra|kiem tra|check|xem)\s*(?:[oổ] [dđ][iĩ]a|o dia|disk|[oổ] c[uứ]ng|o cung|ssd|hdd)": [
-        {"type": "cli", "command": "wmic diskdrive get Status,Model,Size"},
         {"type": "cli", "command": "fsutil volume diskfree C:"},
+        {"type": "cli", "command": "reg query \"HKLM\\HARDWARE\\DEVICEMAP\\Scsi\" /s /v Identifier"},
     ],
     # Xem port / cổng
     r"(?:xem|check|ki[eể]m tra|kiem tra)\s*(?:port|c[oổ]ng|cong|k[eế]t n[oố]i|ket noi)\s*(?:đang d[uù]ng|dang dung)?": [
@@ -140,7 +140,7 @@ DIAGNOSTIC_PATTERNS = {
         {"type": "cli", "command": "ipconfig /all"},
     ],
     # Xem user / người dùng
-    r"(?:xem|check|ai|user|ng[uư][oờ]i d[uù]ng|nguoi dung)\s*(?:đang [dđ][aă]ng nh[aậ]p|dang dang nhap|hi[eệ]n t[aạ]i|hien tai)?": [
+    r"(?:xem|check|\bai\b|user|ng[uư][oờ]i d[uù]ng|nguoi dung)\s*(?:đang [dđ][aă]ng nh[aậ]p|dang dang nhap|hi[eệ]n t[aạ]i|hien tai)?": [
         {"type": "cli", "command": "whoami /all"},
     ],
     # Xem tiến trình / process

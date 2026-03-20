@@ -34,6 +34,22 @@ EMO = re.compile(
     r'\u200d\ufe0f\u2705\u274c\u2139\ufe0f\u23f0\u23f3]+'
 )
 
+# Bảng chuyển đổi tiếng Việt có dấu → không dấu (dùng cho autocomplete)
+import unicodedata as _ucd
+
+
+def _no_accent(s: str) -> str:
+    """Chuyển tiếng Việt có dấu → không dấu để so sánh fuzzy.
+    Dùng NFD decomposition — xử lý đúng cả đ/Đ.
+    """
+    # NFD tách dấu ra khỏi ký tự gốc, lọc bỏ combining marks
+    result = "".join(
+        c for c in _ucd.normalize("NFD", s.lower())
+        if _ucd.category(c) != "Mn"
+    )
+    # đ không có combining mark riêng → replace thủ công
+    return result.replace("đ", "d").replace("Đ", "d")
+
 def _dark_titlebar(root):
     """Dark title bar — hỗ trợ cả Win 10 (attr 19) và Win 11 (attr 20)."""
     try:
@@ -604,11 +620,22 @@ class AutoComplete:
             self._hide()
             return
 
-        # Filter
-        matches = [s for s in self._all_items if text in s]
+        # Normalize input không dấu để so sánh với gợi ý có dấu
+        text_no_accent = _no_accent(text)
+
+        # Filter: match cả có dấu lẫn không dấu
+        def _match(s: str) -> bool:
+            s_lower = s.lower()
+            s_no_accent = _no_accent(s)
+            return text in s_lower or text_no_accent in s_no_accent
+
+        def _starts(s: str) -> bool:
+            return s.lower().startswith(text) or _no_accent(s).startswith(text_no_accent)
+
+        matches = [s for s in self._all_items if _match(s)]
         # Ưu tiên startswith
-        starts = [s for s in matches if s.startswith(text)]
-        contains = [s for s in matches if not s.startswith(text)]
+        starts = [s for s in matches if _starts(s)]
+        contains = [s for s in matches if not _starts(s)]
         self._suggestions = (starts + contains)[:self.MAX_SHOW]
 
         if not self._suggestions:
@@ -766,6 +793,7 @@ class ChatApp:
         self._build_chat()
         self._welcome()
         self.root.deiconify()  # Show after everything is ready
+        self.root.state("zoomed")  # Maximize by default
         self.root.bind("<Control-l>", lambda e: self._clear())
         self.root.bind("<Escape>", lambda e: self._cancel() if not self._cancelled and self._is_busy() else None)
         # Font zoom: Ctrl+Plus / Ctrl+Minus

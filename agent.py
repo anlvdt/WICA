@@ -27,37 +27,37 @@ SYSTEM_PROMPT = """Bạn là WICA — Windows Install & Config Agent. Bạn là 
 
 ## FORMAT BẮT BUỘC
 Luôn trả lời JSON (không có text ngoài JSON):
-{{{{
+{{
   "message": "Mô tả ngắn gọn bước hiện tại",
   "actions": [...],
   "done": false
-}}}}
+}}
 
 Khi hoàn thành hoặc không cần thêm actions:
-{{{{
+{{
   "message": "Tóm tắt kết quả",
   "actions": [],
   "done": true
-}}}}
+}}
 
 ## ACTION TYPES
-{{{{ "type": "install", "package": "tên/alias" }}}}
-{{{{ "type": "install_local", "path": "tên_file.exe" }}}}
-{{{{ "type": "uninstall", "package": "tên/alias" }}}}
-{{{{ "type": "search", "query": "từ_khóa" }}}}
-{{{{ "type": "list_installed" }}}}
-{{{{ "type": "system_config", "config": "tên_config" }}}}
-{{{{ "type": "system_info" }}}}
-{{{{ "type": "get_hostname" }}}}
-{{{{ "type": "set_hostname", "name": "TÊN-MÁY" }}}}
-{{{{ "type": "upgrade_all" }}}}
-{{{{ "type": "export_apps" }}}}
-{{{{ "type": "deploy_portable", "source": "file", "dest": "C:\\\\Tools\\\\App", "name": "App" }}}}
-{{{{ "type": "copy_to_all_users", "source": "file", "dest_relative": "path" }}}}
-{{{{ "type": "install_fonts", "source": "thư_mục" }}}}
-{{{{ "type": "remove_bloatware" }}}}
-{{{{ "type": "run_profile", "name": "mac_dinh" }}}}
-{{{{ "type": "cli", "command": "lệnh" }}}}
+{{ "type": "install", "package": "tên/alias" }}
+{{ "type": "install_local", "path": "tên_file.exe" }}
+{{ "type": "uninstall", "package": "tên/alias" }}
+{{ "type": "search", "query": "từ_khóa" }}
+{{ "type": "list_installed" }}
+{{ "type": "system_config", "config": "tên_config" }}
+{{ "type": "system_info" }}
+{{ "type": "get_hostname" }}
+{{ "type": "set_hostname", "name": "TÊN-MÁY" }}
+{{ "type": "upgrade_all" }}
+{{ "type": "export_apps" }}
+{{ "type": "deploy_portable", "source": "file", "dest": "C:\\\\Tools\\\\App", "name": "App" }}
+{{ "type": "copy_to_all_users", "source": "file", "dest_relative": "path" }}
+{{ "type": "install_fonts", "source": "thư_mục" }}
+{{ "type": "remove_bloatware" }}
+{{ "type": "run_profile", "name": "mac_dinh" }}
+{{ "type": "cli", "command": "lệnh" }}
 
 ## AGENTIC PATTERNS — PHẢI THỰC HIỆN
 
@@ -65,12 +65,12 @@ Khi hoàn thành hoặc không cần thêm actions:
 User: "mạng chậm / không có mạng / không vào được web"
 → Round 1: Thu thập dữ liệu
 ```json
-{{{{"actions": [
-  {{{{"type":"cli","command":"ipconfig /all"}}}},
-  {{{{"type":"cli","command":"ping 8.8.8.8 -n 4"}}}},
-  {{{{"type":"cli","command":"nslookup google.com"}}}},
-  {{{{"type":"cli","command":"netstat -rn"}}}}
-], "done": false}}}}
+{{"actions": [
+  {{"type":"cli","command":"ipconfig /all"}},
+  {{"type":"cli","command":"ping 8.8.8.8 -n 4"}},
+  {{"type":"cli","command":"nslookup google.com"}},
+  {{"type":"cli","command":"netstat -rn"}}
+], "done": false}}
 ```
 → Round 2 (sau khi có kết quả): Phân tích và báo cáo
 - Nếu ping 8.8.8.8 fail → DNS/gateway issue → `ipconfig /flushdns`
@@ -81,16 +81,16 @@ User: "mạng chậm / không có mạng / không vào được web"
 ### Chẩn đoán máy chậm/lag
 → Round 1: Thu thập
 ```json
-{{{{"actions": [
-  {{{{"type":"cli","command":"tasklist /FI \"MEMUSAGE gt 150000\" /FO TABLE"}}}},
-  {{{{"type":"cli","command":"wmic cpu get loadpercentage"}}}},
-  {{{{"type":"system_info"}}}}
-], "done": false}}}}
+{{"actions": [
+  {{"type":"cli","command":"tasklist /FI \"MEMUSAGE gt 150000\" /FO TABLE"}},
+  {{"type":"cli","command":"wmic cpu get loadpercentage"}},
+  {{"type":"system_info"}}
+], "done": false}}
 ```
 → Round 2: Dựa vào kết quả — báo cáo process ngốn RAM, gợi ý user tắt startup thủ công
 
 ### Chẩn đoán ổ đĩa
-→ Round 1: `wmic diskdrive get Status,Model,Size`, `fsutil volume diskfree C:`
+→ Round 1: `fsutil volume diskfree C:`, `reg query "HKLM\HARDWARE\DEVICEMAP\Scsi" /s /v Identifier`
 → Round 2: Báo cáo kết quả, gợi ý dọn dẹp thủ công nếu đầy
 
 ### Lỗi Windows Update
@@ -755,6 +755,15 @@ class AntiGravityAgent:
             still_installed = [p for p in bloatware if _is_installed_via_registry(p)]
             if not still_installed:
                 return "đã gỡ hết"
+        elif t == "install_local":
+            path_lower = action.get("path", "").lower()
+            from tools import _is_installed_via_registry
+            if "trendmicro" in path_lower or "officescan" in path_lower:
+                if _is_installed_via_registry("Trend Micro") or _is_installed_via_registry("Apex One"):
+                    return "đã cài rồi"
+            elif "localoffice" in path_lower or "desktopcentral" in path_lower or "uems" in path_lower or "manageengine" in path_lower:
+                if _is_installed_via_registry("ManageEngine") or _is_installed_via_registry("Desktop Central") or _is_installed_via_registry("UEMS"):
+                    return "đã cài rồi"
         return None
 
     def _execute_action(self, action: dict, from_llm: bool = False) -> str:
@@ -769,7 +778,7 @@ class AntiGravityAgent:
         # === SMART SKIP — áp dụng toàn diện cho mọi flow ===
         skip_types = {"install", "uninstall", "system_config", "set_hostname",
                       "deploy_portable", "install_fonts", "copy_to_all_users",
-                      "remove_bloatware"}
+                      "remove_bloatware", "install_local"}
         if t in skip_types:
             skip_reason = self._check_skip(action)
             if skip_reason:
@@ -1319,7 +1328,7 @@ class AntiGravityAgent:
 
             # --- Feed kết quả vào history cho round tiếp ---
             # Phân loại kết quả để LLM dễ phân tích
-            ok_results = [r for r in action_results if "[ok]" in r or "[CLI]" in r and "[error]" not in r]
+            ok_results = [r for r in action_results if ("[ok]" in r or "[CLI]" in r) and "[error]" not in r]
             fail_results = [r for r in action_results if "[error]" in r or "[warn]" in r]
             skip_results = [r for r in action_results if "[skip]" in r]
 

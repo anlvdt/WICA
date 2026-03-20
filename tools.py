@@ -1302,9 +1302,10 @@ class SoftwareManager:
         try:
             # os.startfile = ShellExecuteW = giống user double-click trong Explorer
             # KHÔNG dùng subprocess, KHÔNG silent flags, KHÔNG hidden window
+            # EDR-safe: parent process là Explorer-like, installer hiện UI bình thường
             os.startfile(file_path)
             _audit("INSTALL_LOCAL_RESULT", f"opened {fname}", "OK")
-            return f"[ok] \u0110\u00e3 m\u1edf installer: {fname}\nC\u1eeda s\u1ed5 c\u00e0i \u0111\u1eb7t s\u1ebd hi\u1ec7n l\u00ean, b\u1ea1n thao t\u00e1c b\u00ecnh th\u01b0\u1eddng."
+            return f"[ok] Đã mở installer: {fname}\nCửa sổ cài đặt sẽ hiện lên, bạn thao tác bình thường."
         except OSError as e:
             _audit("INSTALL_LOCAL_RESULT", str(e), "FAIL")
             return f"[error] Không mở được file: {e}"

@@ -14,9 +14,10 @@ import shutil
 import os
 import sys
 
+import time
 DIST_DIR = "dist"
 APP_NAME = "WICA"
-USB_DIR = os.path.join(DIST_DIR, f"{APP_NAME}-USB")
+USB_DIR = os.path.join(DIST_DIR, f"{APP_NAME}-USB_{int(time.time())}")
 
 # API keys can lay tu env var luc build, ma hoa vao file .keys
 _KEY_NAMES = ["GROQ_API_KEY", "NVIDIA_API_KEY"]
