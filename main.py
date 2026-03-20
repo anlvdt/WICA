@@ -792,6 +792,11 @@ class ChatApp:
         self._autocomplete = AutoComplete(self.ent, self.root)
         self._build_chat()
         self._welcome()
+        # Đăng ký callback để hiện SoftVN sync progress real-time lên chat
+        def _softvn_ui_cb(msg: str):
+            self._out_queue.put(("softvn", msg))
+        self.agent._softvn_copy_cb = _softvn_ui_cb
+        self.root.after(100, self._poll_softvn_queue)
         self.root.deiconify()  # Show after everything is ready
         self.root.state("zoomed")  # Maximize by default
         self.root.bind("<Control-l>", lambda e: self._clear())
@@ -1108,6 +1113,25 @@ class ChatApp:
         self._send()
         return "break"
 
+    def _poll_softvn_queue(self):
+        """Poll queue để hiện SoftVN sync progress lên chat (thread-safe)."""
+        try:
+            while True:
+                tag, msg = self._out_queue.get_nowait()
+                if tag == "softvn":
+                    if msg.startswith("[ok]"):
+                        self._w(f"  {msg}\n", "ok")
+                    elif msg.startswith("[x]") or msg.startswith("[~]"):
+                        self._w(f"  {msg}\n", "warn")
+                    else:
+                        self._w(f"  {msg}\n", "info")
+        except Exception:
+            pass
+        # Tiếp tục poll cho đến khi status không còn "pending"
+        status = getattr(self.agent, '_softvn_copy_status', 'pending')
+        if status == "pending":
+            self.root.after(200, self._poll_softvn_queue)
+
     def _welcome(self):
         ctx = get_run_context()
         user = current_username()
@@ -1127,14 +1151,10 @@ class ChatApp:
         else:
             self._w(f"  [i] User: {user} — chạy Admin để áp dụng toàn máy\n", "info")
 
-        # SoftVN copy status
-        status = getattr(self.agent, '_softvn_copy_status', None)
-        if status and status.startswith("synced:"):
-            _, copied, errors = status.split(":")
-            if errors == "0":
-                self._w(f"  [ok] SoftVN đã sync: {copied} file mới từ USB -> C:\\SoftVN\n", "ok")
-            else:
-                self._w(f"  [~] SoftVN sync: {copied} file mới, {errors} lỗi\n", "warn")
+        # SoftVN copy status — chỉ hiện nếu đã xong trước khi UI kịp poll
+        status = getattr(self.agent, '_softvn_copy_status', 'pending')
+        if status == "up_to_date":
+            self._w(f"  [ok] SoftVN đã up-to-date\n", "ok")
         elif status == "permission_denied":
             self._w(f"  [x] Không sync được SoftVN — cần quyền Admin\n", "warn")
 

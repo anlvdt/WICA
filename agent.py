@@ -168,8 +168,10 @@ class AntiGravityAgent:
         self.aliases = self.config.get("aliases", {})
         self.providers = self.config.get("llm_providers", [])
         self.local_paths = self.config.get("local_paths", [])
-        # Tự động copy SoftVN từ USB vào C:\ nếu chưa có
-        self._softvn_copy_status = self._auto_copy_softvn()
+        # Tự động copy SoftVN từ USB vào C:\ trong background (không block UI)
+        self._softvn_copy_status = "pending"
+        self._softvn_copy_cb = None  # callback để notify UI khi xong
+        threading.Thread(target=self._auto_copy_softvn_bg, daemon=True).start()
         # Tự động phát hiện path UniKey, TeamViewer QS từ registry
         # và thêm vào local_paths nếu chưa có
         self._discovered_tools = self._discover_installed_tools()
@@ -292,6 +294,90 @@ class AntiGravityAgent:
                f"synced {src} -> {dest}: copied={copied} skipped={skipped} errors={errors}",
                "OK" if errors == 0 else "WARN")
         return f"synced:{copied}:{errors}"
+
+    def _auto_copy_softvn_bg(self):
+        """Chạy _auto_copy_softvn trong background thread, emit progress real-time."""
+        from tools import _progress_callback, _cb_lock
+
+        def _emit(msg: str):
+            with _cb_lock:
+                cb = _progress_callback
+            if cb:
+                cb(msg)
+            # Cũng notify qua softvn_copy_cb nếu có (set bởi ChatApp)
+            notify = self._softvn_copy_cb
+            if notify:
+                notify(msg)
+
+        # Tìm src
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+
+        candidates = [
+            os.path.join(app_dir, "SoftVN"),
+            os.path.join(os.path.dirname(app_dir), "SoftVN"),
+        ]
+        src = next((p for p in candidates if os.path.isdir(p)), None)
+        dest = r"C:\SoftVN"
+        if dest not in self.local_paths:
+            self.local_paths.append(dest)
+
+        if src is None:
+            _audit("AUTO_COPY_SOFTVN", "SoftVN not found near app", "WARN")
+            self._softvn_copy_status = "not_found"
+            return
+
+        # Đếm tổng file để hiện progress
+        total = sum(len(files) for _, _, files in os.walk(src))
+        _emit(f"Đang sync SoftVN từ USB → C:\\SoftVN ({total} file)...")
+
+        copied = skipped = errors = 0
+        try:
+            for root, dirs, files in os.walk(src):
+                rel_root = os.path.relpath(root, src)
+                dest_root = os.path.join(dest, rel_root) if rel_root != "." else dest
+                os.makedirs(dest_root, exist_ok=True)
+                for fname in files:
+                    src_file = os.path.join(root, fname)
+                    dst_file = os.path.join(dest_root, fname)
+                    if not os.path.exists(dst_file) or \
+                            os.path.getmtime(src_file) > os.path.getmtime(dst_file):
+                        try:
+                            import shutil
+                            shutil.copy2(src_file, dst_file)
+                            copied += 1
+                            _emit(f"  [{copied}/{total}] {fname}")
+                        except Exception:
+                            errors += 1
+                    else:
+                        skipped += 1
+        except PermissionError:
+            _audit("AUTO_COPY_SOFTVN", f"permission denied: {dest}", "FAIL")
+            self._softvn_copy_status = "permission_denied"
+            _emit("[x] Không sync được SoftVN — cần quyền Admin")
+            return
+        except Exception as e:
+            _audit("AUTO_COPY_SOFTVN", f"error: {e}", "FAIL")
+            self._softvn_copy_status = f"error:{e}"
+            _emit(f"[x] Lỗi sync SoftVN: {e}")
+            return
+
+        if copied == 0 and errors == 0:
+            _audit("AUTO_COPY_SOFTVN", f"already up-to-date ({skipped} files)", "SKIP")
+            self._softvn_copy_status = "up_to_date"
+            _emit(f"[ok] SoftVN đã up-to-date ({skipped} file)")
+            return
+
+        _audit("AUTO_COPY_SOFTVN",
+               f"synced {src} -> {dest}: copied={copied} skipped={skipped} errors={errors}",
+               "OK" if errors == 0 else "WARN")
+        self._softvn_copy_status = f"synced:{copied}:{errors}"
+        if errors == 0:
+            _emit(f"[ok] SoftVN sync xong: {copied} file mới → C:\\SoftVN")
+        else:
+            _emit(f"[~] SoftVN sync: {copied} file mới, {errors} lỗi")
 
     @staticmethod
     def _scan_local_paths(local_paths: list[str], max_depth: int = 2) -> str:
