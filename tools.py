@@ -1172,7 +1172,87 @@ class SoftwareManager:
 
     # Các package dùng bootstrapper/ClickToRun — winget spawn child process
     # có console window riêng không thể ẩn. Ưu tiên local installer nếu có.
+    # Khi dùng winget, tail Office log file real-time để hiện progress.
     _PREFER_LOCAL = {"Microsoft.Office", "Microsoft365"}
+
+    @staticmethod
+    def _tail_office_log(stop_event: threading.Event, emit_cb):
+        """Tail Office ClickToRun log file real-time trong background thread.
+
+        Office ghi log vào %TEMP%\\*.log trong quá trình cài.
+        Pattern: SetupExe*.log, OfficeSetup*.log, C2RSetup*.log
+        Đọc từng dòng mới và emit qua callback.
+        EDR-safe: chỉ dùng os + open (Python stdlib).
+        """
+        import glob
+
+        temp_dir = os.environ.get("TEMP", os.environ.get("TMP", ""))
+        win_temp = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Temp")
+        search_dirs = [d for d in [temp_dir, win_temp] if d and os.path.isdir(d)]
+
+        # Patterns log của Office ClickToRun
+        log_patterns = [
+            "OfficeSetup*.log", "SetupExe*.log", "C2RSetup*.log",
+            "Microsoft365*.log", "Office365*.log",
+        ]
+
+        # Timestamp trước khi bắt đầu — chỉ đọc log mới tạo sau thời điểm này
+        start_time = time.time() - 5  # buffer 5s
+
+        log_file = None
+        log_pos = 0
+        last_scan = 0
+
+        while not stop_event.is_set():
+            now = time.time()
+
+            # Scan tìm log file mới mỗi 3s
+            if log_file is None and (now - last_scan) > 3:
+                last_scan = now
+                candidates = []
+                for d in search_dirs:
+                    for pat in log_patterns:
+                        try:
+                            for f in glob.glob(os.path.join(d, pat)):
+                                try:
+                                    mtime = os.path.getmtime(f)
+                                    if mtime >= start_time:
+                                        candidates.append((mtime, f))
+                                except OSError:
+                                    pass
+                        except Exception:
+                            pass
+                if candidates:
+                    candidates.sort(reverse=True)
+                    log_file = candidates[0][1]
+                    log_pos = 0
+                    _audit("OFFICE_LOG", f"tailing {log_file}", "OK")
+                    emit_cb(f"[log] Đang đọc log: {os.path.basename(log_file)}")
+
+            # Đọc dòng mới từ log file
+            if log_file:
+                try:
+                    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(log_pos)
+                        new_lines = f.readlines()
+                        log_pos = f.tell()
+                    for line in new_lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # Lọc các dòng có ý nghĩa (bỏ debug noise)
+                        line_lower = line.lower()
+                        if any(kw in line_lower for kw in [
+                            "error", "warning", "install", "download",
+                            "progress", "success", "fail", "complete",
+                            "percent", "%", "applying", "configuring",
+                            "verifying", "extracting", "copying",
+                        ]):
+                            emit_cb(f"  [office] {line[:120]}")
+                except (OSError, PermissionError):
+                    pass
+
+            time.sleep(1)
 
     def install(self, package: str) -> str:
         """Cài qua winget - Microsoft-signed, EDR trusted."""
@@ -1189,9 +1269,34 @@ class SoftwareManager:
             local = self._try_local_fallback(pkg_id, prefer_local=True)
             if local:
                 return local
-            # Không có local → winget, nhưng cảnh báo trước
+            # Không có local → winget + tail log real-time
             if cb:
-                cb(f"[warn] Office sẽ mở cửa sổ console đen trong quá trình cài (~30 phút). Đây là bình thường.")
+                cb("[...] Cài Office qua winget — đang theo dõi log real-time...")
+            stop_tail = threading.Event()
+            tail_thread = threading.Thread(
+                target=self._tail_office_log,
+                args=(stop_tail, cb if cb else lambda _: None),
+                daemon=True,
+            )
+            tail_thread.start()
+            try:
+                args = [
+                    "install", "--id", pkg_id,
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--source", "winget",
+                    "-e",
+                ]
+                code, output = _run_winget_progress(args)
+            finally:
+                stop_tail.set()
+                tail_thread.join(timeout=3)
+            if code == 0:
+                return f"[ok] Đã cài đặt: {package} ({pkg_id})"
+            elif "already installed" in output.lower():
+                return f"[info] {package} đã được cài rồi."
+            reason = _explain_exit_code(code)
+            return f"[error] Lỗi cài đặt {package}: {reason}"
         args = [
             "install", "--id", pkg_id,
             "--accept-package-agreements",
