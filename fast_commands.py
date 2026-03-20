@@ -34,7 +34,6 @@ CONFIG_MAP = {
     r"(?:tắt|tat|disable).*(?:notification|thông báo|thong bao)": "disable_notifications",
     r"(?:bật|bat|enable).*(?:notification|thông báo|thong bao)": "enable_notifications",
     r"(?:tắt|tat|disable).*(?:tips|mẹo|meo|gợi ý|goi y)": "disable_tips",
-    r"(?:tắt|tat|disable).*(?:weather|thời tiết|thoi tiet|widget)": "disable_widgets",
     r"(?:search|tìm kiếm|tim kiem).*(?:icon|biểu tượng|bieu tuong|only)": "search_icon_only",
     r"(?:ẩn|an|hide|tắt|tat).*(?:search|tìm kiếm|tim kiem).*(?:box|ô|thanh)": "search_hidden",
     r"(?:tắt|tat|ẩn|an|disable|hide).*(?:task\s*view)": "disable_task_view",

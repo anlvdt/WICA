@@ -745,6 +745,16 @@ class ChatApp:
         self.root = tk.Tk()
         self.root.withdraw()  # Hide during setup to prevent white flash
         self.root.title("WICA - Windows Install CLI Agent")
+        
+        # Load app icon if available
+        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        icon_path = os.path.join(base_dir, "app_icon.ico")
+        if os.path.exists(icon_path):
+            try:
+                self.root.iconbitmap(icon_path)
+            except Exception:
+                pass
+                
         self.root.configure(bg=C["bg"])
         self._center_window(1000, 720)
         self.root.minsize(560, 420)

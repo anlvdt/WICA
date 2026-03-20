@@ -778,7 +778,7 @@ def install_fonts(source_folder: str) -> str:
     _audit("INSTALL_FONTS", f"src={source_folder}")
 
     if not os.path.isdir(source_folder):
-        return f"[error] Không tìm thấy thư mục font: {source_folder}"
+        return f"[error] Không tìm thấy thư mục font: '{source_folder}'. Gợi ý cho AI: Hãy dùng tool 'cli' với command 'dir' để tìm tên thư mục chứa font đúng trên cấu trúc thư mục (có thể nó có tên khác), sau đó thiết lập lại đường dẫn và gọi lại chức năng install_fonts."
 
     fonts_dir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Fonts")
     font_exts = {".ttf", ".otf", ".ttc"}
@@ -1460,20 +1460,6 @@ REGISTRY_CONFIGS = {
             ("SubscribedContent-353694Enabled", 0, winreg.REG_DWORD),
             ("SubscribedContent-353696Enabled", 0, winreg.REG_DWORD),
             ("SoftLandingEnabled", 0, winreg.REG_DWORD),
-        ],
-    },
-    "disable_weather": {
-        "hive": winreg.HKEY_CURRENT_USER,
-        "key": r"SOFTWARE\Microsoft\Windows\CurrentVersion\Feeds",
-        "values": [
-            ("ShellFeedsTaskbarViewMode", 2, winreg.REG_DWORD),
-        ],
-    },
-    "disable_widgets": {
-        "hive": winreg.HKEY_CURRENT_USER,
-        "key": r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-        "values": [
-            ("TaskbarDa", 0, winreg.REG_DWORD),
         ],
     },
     "search_icon_only": {

@@ -125,9 +125,10 @@ User: "mạng chậm / không có mạng / không vào được web"
 Khi nhận được kết quả thực thi:
 1. **Phân tích kết quả** — xác định thành công/thất bại/cần thêm thông tin
 2. **Nếu có lỗi** → tạo actions để fix lỗi đó
-3. **Nếu cần thêm thông tin** → tạo actions để thu thập
-4. **Nếu đã xong** → `"done": true` với tóm tắt
-5. **KHÔNG bao giờ** dừng giữa chừng khi vẫn còn vấn đề chưa giải quyết
+3. **Đặc biệt: Nếu có lỗi không tìm thấy file/thư mục (Not Found)** → LUÔN DÙNG tool `cli` với lệnh `dir` để dò tìm cấu trúc thư mục thực sự, tìm tên đúng rồi gọi lại công cụ. 
+4. **Nếu cần thêm thông tin** → tạo actions để thu thập
+5. **Nếu đã xong** → `"done": true` với tóm tắt
+6. **KHÔNG bao giờ** dừng giữa chừng khi vẫn còn vấn đề chưa giải quyết
 
 ## CẤM TUYỆT ĐỐI (GENERAL)
 - Trả lời chỉ có text, không có actions (trừ khi `done: true`)
@@ -948,8 +949,6 @@ class AntiGravityAgent:
                 "disable_notifications": "Tắt Notification Center",
                 "enable_notifications": "Bật Notification Center",
                 "disable_tips": "Tắt Tips/Gợi ý Windows",
-                "disable_weather": "Tắt Weather trên taskbar",
-                "disable_widgets": "Tắt Widgets trên taskbar",
                 "search_icon_only": "Search chỉ hiện icon",
                 "search_hidden": "Ẩn Search trên taskbar",
                 "search_box": "Hiện ô Search trên taskbar",

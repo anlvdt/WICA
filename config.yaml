@@ -136,8 +136,6 @@ profiles:
       - {type: system_config, config: timezone_SE_Asia_Standard_Time}
       - {type: system_config, config: date_dmy}
       - {type: system_config, config: show_file_ext}
-      - {type: system_config, config: disable_widgets}
-      - {type: system_config, config: disable_weather}
       - {type: system_config, config: disable_task_view}
       - {type: system_config, config: search_icon_only}
       - {type: system_config, config: unpin_store_taskbar}
@@ -162,7 +160,7 @@ profiles:
       - {type: deploy_portable, source: "TeamViewerQS_x64.exe", dest: "C:\\Tools\\TeamViewerQS", name: "TeamViewer QS"}
       - {type: deploy_portable, source: "unikey46RC2-230919-win64", dest: "C:\\Tools\\UniKey", name: "UniKey", exe: "UniKeyNT.exe"}
       - {type: copy_to_all_users, source: "profiles.xml", dest_relative: "AppData\\Local\\SonicWall\\SnwlConnect\\Documents"}
-      - {type: install_fonts, source: "Fonts"}
+      - {type: install_fonts, source: "VNI"}
       # === BƯỚC 5: Cài từ file local ===
       - {type: install_local, path: "LocalOffice_Agent-2310.exe"}
       - {type: install_local, path: "trendmicro_agent_cloud_x64.msi"}
@@ -185,11 +183,11 @@ quick_commands:
     action: {type: copy_to_all_users, source: "profiles.xml", dest_relative: "AppData\\Local\\SonicWall\\SnwlConnect\\Documents"}
   # --- Font ---
   "cài font":
-    action: {type: install_fonts, source: "Fonts"}
+    action: {type: install_fonts, source: "VNI"}
   "cài font vni":
-    action: {type: install_fonts, source: "Fonts"}
+    action: {type: install_fonts, source: "VNI"}
   "font vni":
-    action: {type: install_fonts, source: "Fonts"}
+    action: {type: install_fonts, source: "VNI"}
   # --- Cài local ---
   "localoffice agent":
     action: {type: install_local, path: "LocalOffice_Agent-2310.exe"}
@@ -210,10 +208,6 @@ quick_commands:
   "bloatware":
     action: {type: remove_bloatware}
   # --- Cấu hình taskbar ---
-  "tắt widget":
-    action: {type: system_config, config: disable_widgets}
-  "tắt weather":
-    action: {type: system_config, config: disable_widgets}
   "tắt task view":
     action: {type: system_config, config: disable_task_view}
   "search icon":

@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('config.yaml', '.')],
+    datas=[('config.yaml', '.'), ('app_icon.ico', '.')],
     hiddenimports=['yaml', 'openai', 'win32com.client', 'keystore'],
     hookspath=[],
     hooksconfig={},
@@ -32,7 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='NONE',
+    icon=['app_icon.ico'],
 )
 coll = COLLECT(
     exe,
