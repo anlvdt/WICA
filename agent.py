@@ -90,7 +90,7 @@ User: "mạng chậm / không có mạng / không vào được web"
 → Round 2: Dựa vào kết quả — báo cáo process ngốn RAM, gợi ý user tắt startup thủ công
 
 ### Chẩn đoán ổ đĩa
-→ Round 1: `fsutil volume diskfree C:`, `reg query "HKLM\HARDWARE\DEVICEMAP\Scsi" /s /v Identifier`
+→ Round 1: `fsutil volume diskfree C:`, `reg query "HKLM\\HARDWARE\\DEVICEMAP\\Scsi" /s /v Identifier`
 → Round 2: Báo cáo kết quả, gợi ý dọn dẹp thủ công nếu đầy
 
 ### Lỗi Windows Update
