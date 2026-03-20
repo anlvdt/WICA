@@ -1,15 +1,28 @@
 # -*- coding: utf-8 -*-
-"""Keystore - lưu trữ API key đã mã hóa (obfuscated).
+"""Keystore - lưu trữ API key dạng obfuscated (XOR + base64).
 
-Key được XOR với machine-independent salt rồi encode base64.
+⚠️  SECURITY WARNING:
+    Đây KHÔNG phải mã hóa thực sự (encryption). XOR với salt cố định chỉ là
+    obfuscation — bất kỳ ai có source code hoặc binary đều có thể giải mã.
+    File .keys ẩn khỏi người dùng thông thường nhưng KHÔNG chống được reverse
+    engineering. Dùng DPAPI sẽ an toàn hơn nhưng không portable (keys phụ thuộc
+    machine/user).
+
+    Với use case portable USB:
+    - Obfuscation chấp nhận được (chỉ ẩn khỏi mắt thường)
+    - Nếu cần bảo mật cao hơn: đặt API key qua env var trên mỗi máy đích,
+      không dùng .keys file
+
+Key được XOR với salt cố định rồi encode base64.
 File .keys là binary, không đọc được bằng mắt thường.
-Không phải crypto mạnh nhưng đủ ẩn khỏi người dùng thông thường.
 """
 import base64
 import json
 import os
 
-_SALT = b"W1CA_AnT1Gr4v1tY_2026!"  # XOR salt cố định
+# XOR salt cố định — importable bởi build_portable.py
+# Xem security warning ở trên trước khi thay đổi.
+_SALT = b"W1CA_AnT1Gr4v1tY_2026!"
 
 def _find_keyfile() -> str:
     """Tìm file .keys - thử nhiều vị trí (frozen vs dev)."""

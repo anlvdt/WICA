@@ -83,6 +83,12 @@ CLEAR_PATTERNS = [
     r"^(?:clear|cls|x[oó]a m[aà]n h[iì]nh|xoa man hinh|l[aà]m s[aạ]ch)$",
 ]
 
+CHECK_SKIP_PATTERNS = [
+    r"(?:ki[eể]m tra|kiem tra|check)\s+skip",
+    r"(?:xem|check)\s+(?:skip|b[oỏ] qua|bo qua)",
+    r"skip\s+(?:ho[aạ]t [dđ][oộ]ng|hoat dong|check|ki[eể]m tra|kiem tra)",
+]
+
 UPGRADE_PATTERNS = [
     r"^(?:c[aậ]p nh[aậ]t|cap nhat|upgrade|update)\s*(?:t[aấ]t c[aả]|tat ca|all|h[eế]t|het)?$",
 ]
@@ -91,27 +97,71 @@ EXPORT_PATTERNS = [
     r"(?:xu[aấ]t|xuat|export)\s*(?:danh s[aá]ch|danh sach|app|list|ph[aầ]n m[eề]m|phan mem)?",
 ]
 
-# CLI commands - detect khi input bắt đầu bằng tên lệnh trong whitelist
-_CLI_COMMANDS = {
-    # Network
-    "ipconfig", "ping", "tracert", "nslookup", "netstat", "arp",
-    "route", "pathping", "nbtstat", "getmac",
-    # System info
-    "hostname", "whoami", "systeminfo", "ver", "wmic",
-    "tasklist", "taskkill", "sc",
-    # File operations (read-only / safe)
-    "dir", "type", "where", "tree", "attrib", "icacls",
-    "certutil", "cipher",
-    # Winget
-    "winget",
-    # Disk
-    "chkdsk", "diskpart", "fsutil",
-    # Network config
-    "netsh",
-    # Other safe tools
-    "sfc", "dism", "gpresult", "gpupdate",
-    "bcdedit", "shutdown", "tzutil", "reg",
+# Diagnostic patterns → auto-generate multi-action CLI chains (no LLM needed)
+DIAGNOSTIC_PATTERNS = {
+    # Mạng chậm / không có mạng
+    r"(?:m[aạ]ng|mang)\s*(?:ch[aậ]m|cham|y[eế]u|yeu|l[aỗ]i|loi|kh[oô]ng|khong|m[aấ]t|mat|die|lag|drop|disconnect)": [
+        {"type": "cli", "command": "ipconfig /all"},
+        {"type": "cli", "command": "ping 8.8.8.8 -n 4"},
+        {"type": "cli", "command": "nslookup google.com"},
+    ],
+    r"(?:kh[oô]ng|khong|ko)\s*(?:v[aà]o|vao|k[eế]t n[oố]i|ket noi)\s*(?:đ[uư][oợ]c|duoc)?\s*(?:m[aạ]ng|mang|net|web|internet)": [
+        {"type": "cli", "command": "ipconfig /all"},
+        {"type": "cli", "command": "ping 8.8.8.8 -n 4"},
+        {"type": "cli", "command": "ping google.com -n 4"},
+    ],
+    # Máy lag / máy chậm
+    r"(?:m[aá]y|may)\s*(?:ch[aậ]m|cham|lag|gi[aậ]t|giat|đ[oơ]|do|treo|đứng)": [
+        {"type": "cli", "command": "tasklist /FI \"MEMUSAGE gt 100000\" /FO TABLE"},
+        {"type": "system_info"},
+    ],
+    # Fix DNS / flush DNS
+    r"(?:fix|flush|x[oó]a|xoa|l[aà]m m[oớ]i|lam moi|reset)\s*dns": [
+        {"type": "cli", "command": "ipconfig /flushdns"},
+        {"type": "cli", "command": "nslookup google.com"},
+    ],
+    # Kiểm tra ổ đĩa / disk
+    r"(?:ki[eể]m tra|kiem tra|check|xem)\s*(?:[oổ] [dđ][iĩ]a|o dia|disk|[oổ] c[uứ]ng|o cung|ssd|hdd)": [
+        {"type": "cli", "command": "wmic diskdrive get Status,Model,Size"},
+        {"type": "cli", "command": "fsutil volume diskfree C:"},
+    ],
+    # Xem port / cổng
+    r"(?:xem|check|ki[eể]m tra|kiem tra)\s*(?:port|c[oổ]ng|cong|k[eế]t n[oố]i|ket noi)\s*(?:đang d[uù]ng|dang dung)?": [
+        {"type": "cli", "command": "netstat -ano"},
+    ],
+    # Xem Wi-Fi / WiFi password / mật khẩu wifi
+    r"(?:xem|check|l[aấ]y|lay)\s*(?:m[aậ]t kh[aẩ]u|mat khau|pass|password)\s*(?:wifi|wi-fi)": [
+        {"type": "cli", "command": "netsh wlan show profiles"},
+    ],
+    r"(?:wifi|wi-fi)\s*(?:m[aậ]t kh[aẩ]u|mat khau|pass|password|info)": [
+        {"type": "cli", "command": "netsh wlan show profiles"},
+    ],
+    # IP / địa chỉ IP
+    r"(?:xem|check|l[aấ]y|lay)\s*(?:ip|[dđ][iị]a ch[iỉ]|dia chi)\s*(?:m[aá]y|may|c[uủ]a|cua)?": [
+        {"type": "cli", "command": "ipconfig /all"},
+    ],
+    # Xem user / người dùng
+    r"(?:xem|check|ai|user|ng[uư][oờ]i d[uù]ng|nguoi dung)\s*(?:đang [dđ][aă]ng nh[aậ]p|dang dang nhap|hi[eệ]n t[aạ]i|hien tai)?": [
+        {"type": "cli", "command": "whoami /all"},
+    ],
+    # Xem tiến trình / process
+    r"(?:xem|check|li[eệ]t k[eê])\s*(?:ti[eế]n tr[iì]nh|tien trinh|process|task)": [
+        {"type": "cli", "command": "tasklist /FO TABLE"},
+    ],
+    # Kiểm tra Windows Update
+    r"(?:l[oỗ]i|loi|fix|s[uử]a|sua|ki[eể]m tra|kiem tra|check)\s*(?:windows\s*)?update": [
+        {"type": "cli", "command": "sc query wuauserv"},
+        {"type": "cli", "command": "sc query bits"},
+    ],
+    # Gỡ bloatware
+    r"(?:g[oỡ]|go|x[oó]a|xoa|remove|delete)\s*(?:bloatware|r[aá]c|rac|app r[aá]c|app rac)": [
+        {"type": "remove_bloatware"},
+    ],
 }
+
+
+# CLI commands - import từ shared_constants (single source of truth)
+from shared_constants import CLI_WHITELIST as _CLI_COMMANDS
 
 
 def parse_fast(text: str, quick_commands: dict = None) -> list[dict] | None:
@@ -129,10 +179,21 @@ def parse_fast(text: str, quick_commands: dict = None) -> list[dict] | None:
         if re.search(p, text_lower):
             return [{"type": "clear"}]
 
+    # Check skip
+    for p in CHECK_SKIP_PATTERNS:
+        if re.search(p, text_lower):
+            return [{"type": "check_skip_profile", "name": "mac_dinh"}]
+
     # CLI command - detect khi input bắt đầu bằng lệnh whitelist
     first_word = text_lower.split()[0].replace(".exe", "") if text_lower.split() else ""
     if first_word in _CLI_COMMANDS:
         return [{"type": "cli", "command": text}]
+
+    # Diagnostic patterns — multi-action CLI chains (mạng chậm, máy lag, etc.)
+    for pattern, actions in DIAGNOSTIC_PATTERNS.items():
+        if re.search(pattern, text_lower):
+            import copy
+            return copy.deepcopy(actions)
 
     # Quick commands từ config.yaml (cài teamviewer qs, copy profile vpn, cài font...)
     if quick_commands:

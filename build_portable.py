@@ -6,9 +6,13 @@ QUAN TRONG:
 - --onefile unpack vao %TEMP% = bi Defender/CrowdStrike flag ngay
 - KHONG tao .bat file (bat = script = EDR canh bao)
 """
+import sys
+# Fix Unicode output trên console cp1252 (Windows default)
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import subprocess
 import shutil
 import os
+import sys
 
 DIST_DIR = "dist"
 APP_NAME = "WICA"
@@ -19,7 +23,12 @@ _KEY_NAMES = ["GROQ_API_KEY", "NVIDIA_API_KEY"]
 
 
 def _create_keyfile(dest_dir: str):
-    """Doc API key tu env var hoac registry, ma hoa va luu vao .keys."""
+    """Doc API key tu env var hoac registry, ma hoa va luu vao .keys.
+
+    Import salt va xor tu keystore.py — KHONG duplicate.
+    """
+    from keystore import _SALT, _xor
+
     keys = {}
     for name in _KEY_NAMES:
         # Thu env var truoc
@@ -56,31 +65,30 @@ def _create_keyfile(dest_dir: str):
                 pass
         if val:
             keys[name] = val
-            print(f"  [key] {name} -> da ma hoa vao .keys")
+            print(f"  [key] {name} -> đã mã hóa vào .keys")
     if keys:
-        raw = __import__("json").dumps(keys, ensure_ascii=False).encode("utf-8")
         import base64
-        salt = b"W1CA_AnT1Gr4v1tY_2026!"
-        encrypted = base64.b64encode(bytes(d ^ salt[i % len(salt)] for i, d in enumerate(raw)))
+        raw = __import__("json").dumps(keys, ensure_ascii=False).encode("utf-8")
+        encrypted = base64.b64encode(_xor(raw, _SALT))
         keyfile = os.path.join(dest_dir, ".keys")
         with open(keyfile, "wb") as f:
             f.write(encrypted)
-        print(f"  [key] File .keys da tao: {keyfile}")
+        print(f"  [key] File .keys đã tạo: {keyfile}")
     else:
-        print("  [key] Khong tim thay API key trong env var hoac registry")
+        print("  [key] Không tìm thấy API key trong env var hoặc registry")
 
 
 def build():
-    print(f"[build] Dang build {APP_NAME} portable...")
+    print(f"[build] Đang build {APP_NAME} portable...")
 
     # === CLEAN BUILD: Xoa cache cu de dam bao code moi nhat ===
     for d in ["build", os.path.join(DIST_DIR, APP_NAME)]:
         if os.path.exists(d):
-            print(f"  [clean] Xoa {d}/")
+            print(f"  [clean] Xóa {d}/")
             shutil.rmtree(d)
     spec_file = f"{APP_NAME}.spec"
     if os.path.isfile(spec_file):
-        print(f"  [clean] Xoa {spec_file}")
+        print(f"  [clean] Xóa {spec_file}")
         os.remove(spec_file)
 
     # PyInstaller FOLDER mode (EDR-safe, KHONG --onefile)
@@ -108,7 +116,7 @@ def build():
     if os.path.isdir(src_folder):
         shutil.copytree(src_folder, os.path.join(USB_DIR, APP_NAME), dirs_exist_ok=True)
     else:
-        print(f"[error] Khong tim thay: {src_folder}")
+        print(f"[error] Không tìm thấy: {src_folder}")
         return
 
     # Copy config (giu nguyen env:xxx placeholder - app tu doc tu registry)
@@ -134,36 +142,46 @@ def build():
     print(f"\n[ok] Portable build: {USB_DIR}/")
     print(f"  {APP_NAME}-USB/")
     print(f"  +-- {APP_NAME}/")
-    print(f"      +-- {APP_NAME}.exe   (Chay truc tiep)")
+    print(f"      +-- {APP_NAME}.exe   (Chạy trực tiếp)")
     print(f"      +-- config.yaml      (Cau hinh)")
     print(f"      +-- logs/            (Audit log)")
     print(f"\n[ok] ZIP: {zip_file} ({zip_size:.1f} MB)")
 
-    # === Auto copy sang USB (F:\App\) va ZIP (F:\) ===
-    usb_app = r"F:\App"
-    usb_zip = r"F:\WICA-Portable.zip"
-    src_app = os.path.join(USB_DIR, APP_NAME)
-    if os.path.exists("F:\\"):
+    # === Auto copy sang USB nếu có ===
+    usb_drive = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("--usb="):
+            usb_drive = arg.split("=", 1)[1].rstrip("\\/")
+            break
+    # Fallback: auto-detect F:\ nếu không có --usb arg
+    if usb_drive is None and os.path.exists("F:\\"):
+        usb_drive = "F:"
+
+    if usb_drive and os.path.exists(usb_drive + "\\"):
+        usb_app = os.path.join(usb_drive, "App")
+        usb_zip = os.path.join(usb_drive, "WICA-Portable.zip")
+        src_app = os.path.join(USB_DIR, APP_NAME)
         # Copy app sang USB
         try:
             if os.path.exists(usb_app):
                 shutil.rmtree(usb_app)
             shutil.copytree(src_app, usb_app, dirs_exist_ok=True)
-            print(f"\n[ok] Da copy sang USB: {usb_app}")
+            print(f"\n[ok] Đã copy sang USB: {usb_app}")
         except Exception as e:
-            print(f"\n[warn] Loi copy sang USB: {e}")
+            print(f"\n[warn] Lỗi copy sang USB: {e}")
         # Copy ZIP sang USB
         try:
             shutil.copy2(zip_file, usb_zip)
-            print(f"[ok] Da copy ZIP sang USB: {usb_zip}")
+            print(f"[ok] Đã copy ZIP sang USB: {usb_zip}")
         except Exception as e:
-            print(f"[warn] Loi copy ZIP: {e}")
+            print(f"[warn] Lỗi copy ZIP: {e}")
     else:
-        print(f"\n[info] USB (F:) khong co. Copy thu cong:")
+        print(f"\n[info] USB không có. Dùng --usb=X: để chỉ định ổ USB.")
 
-    print(f"\nCopy file .zip hoac thu muc {APP_NAME}-USB vao USB de su dung.")
-    print(f"Giai nen zip, chay {APP_NAME}.exe truc tiep, khong can cai dat.")
+    print(f"\nCopy file .zip hoặc thư mục {APP_NAME}-USB vào USB để sử dụng.")
+    print(f"Giải nén zip, chạy {APP_NAME}.exe trực tiếp, không cần cài đặt.")
 
 
 if __name__ == "__main__":
     build()
+

@@ -137,6 +137,7 @@ profiles:
       - {type: system_config, config: date_dmy}
       - {type: system_config, config: show_file_ext}
       - {type: system_config, config: disable_widgets}
+      - {type: system_config, config: disable_weather}
       - {type: system_config, config: disable_task_view}
       - {type: system_config, config: search_icon_only}
       - {type: system_config, config: unpin_store_taskbar}
@@ -164,6 +165,7 @@ profiles:
       - {type: install_fonts, source: "Fonts"}
       # === BƯỚC 5: Cài từ file local ===
       - {type: install_local, path: "LocalOffice_Agent-2310.exe"}
+      - {type: install_local, path: "trendmicro_agent_cloud_x64.msi"}
       # === BƯỚC 6: Bật lại UAC ===
       - {type: system_config, config: uac_on}
 
@@ -195,6 +197,13 @@ quick_commands:
     action: {type: install_local, path: "LocalOffice_Agent-2310.exe"}
   "desktop central":
     action: {type: install_local, path: "LocalOffice_Agent-2310.exe"}
+  # --- TrendMicro ---
+  "trendmicro":
+    action: {type: install_local, path: "trendmicro_agent_cloud_x64.msi"}
+  "trend micro":
+    action: {type: install_local, path: "trendmicro_agent_cloud_x64.msi"}
+  "officescan":
+    action: {type: install_local, path: "trendmicro_agent_cloud_x64.msi"}
   # --- Bloatware ---
   "gỡ bloatware":
     action: {type: remove_bloatware}

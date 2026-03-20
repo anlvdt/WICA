@@ -1,0 +1,163 @@
+[
+  {
+    "id": 1,
+    "command": "const",
+    "timestamp": "2026-03-20T02:48:09.906Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 2,
+    "command": "const",
+    "timestamp": "2026-03-20T02:48:42.508Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 3,
+    "command": "const",
+    "timestamp": "2026-03-20T02:49:01.108Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 4,
+    "command": "WICAspec",
+    "timestamp": "2026-03-20T02:51:12.598Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 5,
+    "command": "WICAspec",
+    "timestamp": "2026-03-20T02:51:31.882Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 6,
+    "command": "WICAspec",
+    "timestamp": "2026-03-20T02:51:50.918Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 7,
+    "command": "run",
+    "timestamp": "2026-03-20T02:52:50.259Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 8,
+    "command": "run",
+    "timestamp": "2026-03-20T02:53:13.113Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 9,
+    "command": "run",
+    "timestamp": "2026-03-20T02:53:32.831Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 10,
+    "command": "run",
+    "timestamp": "2026-03-20T02:54:41.592Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 11,
+    "command": "run",
+    "timestamp": "2026-03-20T02:55:32.717Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 12,
+    "command": "run",
+    "timestamp": "2026-03-20T02:55:52.018Z",
+    "reason": "Trigger: Background process [BG-process]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 13,
+    "command": "const",
+    "timestamp": "2026-03-20T02:56:17.585Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 14,
+    "command": "const",
+    "timestamp": "2026-03-20T02:56:37.170Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 15,
+    "command": "const",
+    "timestamp": "2026-03-20T02:56:56.549Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 16,
+    "command": "const",
+    "timestamp": "2026-03-20T02:57:23.973Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 17,
+    "command": "const",
+    "timestamp": "2026-03-20T02:57:44.849Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 18,
+    "command": "const",
+    "timestamp": "2026-03-20T02:58:06.856Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 19,
+    "command": "const",
+    "timestamp": "2026-03-20T02:58:31.681Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 20,
+    "command": "catch",
+    "timestamp": "2026-03-20T02:59:43.169Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 21,
+    "command": "PROBLEMS",
+    "timestamp": "2026-03-20T03:00:28.456Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 22,
+    "command": "Screen",
+    "timestamp": "2026-03-20T03:02:13.071Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  },
+  {
+    "id": 23,
+    "command": "Show",
+    "timestamp": "2026-03-20T03:04:18.579Z",
+    "reason": "Trigger: waiting on your input [UIA]",
+    "status": "auto-approved"
+  }
+]

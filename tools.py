@@ -18,6 +18,23 @@ import platform
 import shutil
 import time
 import threading
+
+# Ẩn console window khi spawn subprocess — tránh che app chính
+# EDR-safe: đây là Windows creation flag chuẩn, không phải kỹ thuật injection
+CREATE_NO_WINDOW = 0x08000000
+from shared_constants import (
+    CLI_WHITELIST, CLI_BLACKLIST,
+    WINGET_TIMEOUT, WINGET_UPGRADE_TIMEOUT, WINGET_LIST_TIMEOUT,
+    WINGET_CHECK_TIMEOUT, CLI_TIMEOUT, TIMEZONE_TIMEOUT,
+    SOURCE_RESET_TIMEOUT, SOURCE_UPDATE_TIMEOUT, PROCESS_CLEANUP_TIMEOUT,
+    _CERTUTIL_ALLOWED_SUBCMDS, _NETSH_BLOCKED_SUBCOMMANDS, _NETSH_BLOCKED_WRITE_SUBCMDS,
+    _SC_BLOCKED_SERVICES, _SC_BLOCKED_ACTIONS,
+    _TASKKILL_BLOCKED_PROCESSES, _SHUTDOWN_ALLOWED_FLAGS,
+    _ICACLS_BLOCKED_FLAGS, _CIPHER_BLOCKED_FLAGS,
+    _FSUTIL_BLOCKED_SUBCMDS, _DISM_BLOCKED_FLAGS,
+    _CHKDSK_BLOCKED_FLAGS, _W32TM_BLOCKED_FLAGS,
+)
+from privilege import is_elevated, enable_privilege
 from datetime import datetime
 
 try:
@@ -112,7 +129,7 @@ def _cancel_winget():
         _active_proc = None
 
 
-def _run_winget(args: list[str], timeout: int = 600) -> tuple[int, str]:
+def _run_winget(args: list[str], timeout: int = WINGET_TIMEOUT) -> tuple[int, str]:
     """Gọi winget trực tiếp - không qua shell/cmd/powershell.
 
     winget.exe là Microsoft-signed binary, Defender/CrowdStrike trust nó.
@@ -129,6 +146,7 @@ def _run_winget(args: list[str], timeout: int = 600) -> tuple[int, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=CREATE_NO_WINDOW,
         )
         with _proc_lock:
             _active_proc = proc
@@ -142,15 +160,6 @@ def _run_winget(args: list[str], timeout: int = 600) -> tuple[int, str]:
         finally:
             with _proc_lock:
                 _active_proc = None
-            # Đảm bảo cleanup hoàn toàn — đóng pipe handles + wait
-            try:
-                if proc.stdout:
-                    proc.stdout.close()
-                if proc.stderr:
-                    proc.stderr.close()
-                proc.wait(timeout=5)
-            except Exception:
-                pass
         output = stdout.strip()
         if proc.returncode != 0 and stderr:
             output += "\n" + stderr.strip()
@@ -194,7 +203,7 @@ def _is_noise(line: str) -> bool:
     return False
 
 
-def _run_winget_progress(args: list[str], timeout: int = 600) -> tuple[int, str]:
+def _run_winget_progress(args: list[str], timeout: int = WINGET_TIMEOUT) -> tuple[int, str]:
     """Winget với realtime progress output.
 
     Đọc stdout char-by-char, tách dòng bằng cả \\n và \\r.
@@ -212,6 +221,7 @@ def _run_winget_progress(args: list[str], timeout: int = 600) -> tuple[int, str]
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=CREATE_NO_WINDOW,
         )
         with _proc_lock:
             _active_proc = proc
@@ -246,15 +256,6 @@ def _run_winget_progress(args: list[str], timeout: int = 600) -> tuple[int, str]
             with _proc_lock:
                 _active_proc = None
         stderr = proc.stderr.read() if proc.stderr else ""
-        # Cleanup hoàn toàn — đóng pipe handles + wait
-        try:
-            if proc.stdout:
-                proc.stdout.close()
-            if proc.stderr:
-                proc.stderr.close()
-            proc.wait(timeout=5)
-        except Exception:
-            pass
         output = "\n".join(all_lines).strip()
         if proc.returncode != 0 and stderr:
             output += "\n" + stderr.strip()
@@ -303,6 +304,10 @@ def _get_user_sids() -> list[str]:
 
     EDR-safe: chỉ dùng winreg (Python stdlib), không spawn process.
     Bỏ qua SID _Classes (duplicate) và system accounts.
+
+    Khi chạy elevated (Run as Admin/different user), HKEY_USERS chỉ chứa
+    hive của các user đang có active session. Nếu user thường chưa login
+    thì SID của họ không có ở đây — caller phải fallback về HKCU.
     """
     sids = []
     try:
@@ -317,44 +322,259 @@ def _get_user_sids() -> list[str]:
                 break
     except Exception:
         pass
+
+    # Nếu không tìm thấy SID nào, thử lấy SID của user hiện tại qua
+    # HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
+    # để biết user nào đã từng login (hive có thể chưa load vào HKEY_USERS)
+    if not sids:
+        try:
+            profile_list_key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList",
+                0, winreg.KEY_READ
+            )
+            i = 0
+            while True:
+                try:
+                    sid = winreg.EnumKey(profile_list_key, i)
+                    if sid.startswith("S-1-5-21") and not sid.endswith("_Classes"):
+                        # Kiểm tra profile path tồn tại (user thực, không phải ghost)
+                        try:
+                            sk = winreg.OpenKey(profile_list_key, sid, 0, winreg.KEY_READ)
+                            profile_path, _ = winreg.QueryValueEx(sk, "ProfileImagePath")
+                            winreg.CloseKey(sk)
+                            expanded = os.path.expandvars(profile_path)
+                            if os.path.isdir(expanded):
+                                sids.append(sid)
+                        except (OSError, FileNotFoundError):
+                            pass
+                    i += 1
+                except OSError:
+                    break
+            winreg.CloseKey(profile_list_key)
+        except Exception:
+            pass
+
     return sids
+
+
+def _apply_to_default_profile(key_path: str, value_name: str,
+                              value, value_type=winreg.REG_DWORD) -> bool:
+    """Ghi registry vào Default User profile (C:\\Users\\Default\\NTUSER.DAT).
+
+    User mới tạo trên máy sẽ kế thừa settings này.
+    Yêu cầu: elevated (admin) + SE_RESTORE_PRIVILEGE + SE_BACKUP_PRIVILEGE.
+
+    Flow: LoadKey → ghi → UnloadKey.
+    EDR-safe: chỉ dùng winreg module.
+    """
+    if not is_elevated():
+        _audit("DEFAULT_PROFILE", "skipped — not elevated", "SKIP")
+        return False
+
+    # Path đến NTUSER.DAT của Default User profile
+    sys_drive = os.environ.get("SystemDrive", "C:")
+    ntuser_path = os.path.join(sys_drive + os.sep, "Users", "Default", "NTUSER.DAT")
+
+    if not os.path.exists(ntuser_path):
+        _audit("DEFAULT_PROFILE", f"NTUSER.DAT not found: {ntuser_path}", "WARN")
+        return False
+
+    # Cần privilege để load/unload hive
+    enable_privilege("SeRestorePrivilege")
+    enable_privilege("SeBackupPrivilege")
+
+    # Mount point — unique key name dưới HKEY_USERS
+    mount_key = "_WICA_DEFAULT_TEMP"
+
+    try:
+        # Load hive
+        winreg.LoadKey(winreg.HKEY_USERS, mount_key, ntuser_path)
+        _audit("DEFAULT_PROFILE", f"loaded {ntuser_path} as HKU\\{mount_key}", "OK")
+
+        # Ghi giá trị
+        full_path = f"{mount_key}\\{key_path}"
+        try:
+            key = winreg.CreateKeyEx(winreg.HKEY_USERS, full_path, 0,
+                                     winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, value_name, 0, value_type, value)
+            winreg.CloseKey(key)
+            _audit("DEFAULT_PROFILE", f"set {key_path}\\{value_name}={value}", "OK")
+        except Exception as e:
+            _audit("DEFAULT_PROFILE", f"write failed: {e}", "FAIL")
+
+        # Unload hive — PHẢI gọi để release file lock
+        try:
+            winreg.UnloadKey(winreg.HKEY_USERS, mount_key)
+        except Exception as e:
+            _audit("DEFAULT_PROFILE", f"unload failed: {e}", "FAIL")
+            return False
+
+        return True
+    except PermissionError:
+        _audit("DEFAULT_PROFILE", "LoadKey permission denied", "FAIL")
+        return False
+    except OSError as e:
+        if e.winerror == 32:  # ERROR_SHARING_VIOLATION — NTUSER.DAT đang bị lock
+            _audit("DEFAULT_PROFILE", "NTUSER.DAT locked (Default user logged in?)", "WARN")
+        else:
+            _audit("DEFAULT_PROFILE", f"LoadKey error: {e}", "FAIL")
+        return False
 
 
 def _set_registry_all_users(key_path: str, value_name: str,
                             value, value_type=winreg.REG_DWORD) -> tuple[int, int, list[str]]:
-    """Ghi registry cho TẤT CẢ user profiles trên máy.
+    r"""Ghi registry cho TẤT CẢ user profiles trên máy.
 
-    Duyệt HKEY_USERS\\{SID}\\<key_path> cho mỗi user SID.
-    Cũng ghi vào HKU\\.DEFAULT (cho user mới tạo sau này).
+    Flow:
+    1. Lấy SID từ HKEY_USERS (đang loaded) + ProfileList (đã từng login)
+    2. Với mỗi SID: thử ghi trực tiếp vào HKEY_USERS\{SID}
+       - Nếu fail (hive chưa load) -> load NTUSER.DAT -> ghi -> unload
+    3. Nếu không có SID nào -> fallback HKCU
+    4. Ghi vào Default profile cho user mới
 
     EDR-safe: chỉ dùng winreg module.
-
     Returns: (ok_count, fail_count, errors)
     """
+    from privilege import enable_privilege
+
     sids = _get_user_sids()
-    # Thêm .DEFAULT để user mới tạo sau cũng có config
-    targets = sids + [".DEFAULT"]
     ok_count = 0
     fail_count = 0
     errors = []
-    for sid in targets:
-        full_path = f"{sid}\\{key_path}"
-        _audit("REGISTRY_ALL_USERS", f"SID={sid} key={key_path} {value_name}={value}")
+
+    # Lấy profile paths từ ProfileList để load hive nếu cần
+    profile_paths: dict[str, str] = {}  # SID → NTUSER.DAT path
+    try:
+        pk = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList",
+            0, winreg.KEY_READ
+        )
+        for sid in sids:
+            try:
+                sk = winreg.OpenKey(pk, sid, 0, winreg.KEY_READ)
+                profile_path, _ = winreg.QueryValueEx(sk, "ProfileImagePath")
+                winreg.CloseKey(sk)
+                ntuser = os.path.join(os.path.expandvars(profile_path), "NTUSER.DAT")
+                if os.path.isfile(ntuser):
+                    profile_paths[sid] = ntuser
+            except (OSError, FileNotFoundError):
+                pass
+        winreg.CloseKey(pk)
+    except Exception:
+        pass
+
+    if sids:
+        # Kiểm tra privilege một lần — chỉ thử LoadKey nếu thực sự có privilege
+        has_load_privilege = False
+        if is_elevated():
+            priv_restore = enable_privilege("SeRestorePrivilege")
+            priv_backup  = enable_privilege("SeBackupPrivilege")
+            has_load_privilege = priv_restore and priv_backup
+            if not has_load_privilege:
+                _audit("REGISTRY_ALL_USERS",
+                       "SeRestore/SeBackup not granted — LoadKey disabled, will use HKEY_USERS direct only",
+                       "WARN")
+
+        for sid in sids:
+            full_path = f"{sid}\\{key_path}"
+            _audit("REGISTRY_ALL_USERS", f"SID={sid} key={key_path} {value_name}={value}")
+
+            # --- Path 1: ghi trực tiếp vào HKEY_USERS\{SID} (hive đang loaded) ---
+            try:
+                key = winreg.CreateKeyEx(winreg.HKEY_USERS, full_path, 0,
+                                         winreg.KEY_SET_VALUE)
+                winreg.SetValueEx(key, value_name, 0, value_type, value)
+                winreg.CloseKey(key)
+                ok_count += 1
+                _audit("REGISTRY_ALL_USERS", f"SID={sid} written directly", "OK")
+                continue
+            except (OSError, FileNotFoundError):
+                pass  # Hive chưa load → thử LoadKey nếu có privilege
+            except PermissionError:
+                pass  # Fall through → Path 3 HKCU fallback
+
+            # --- Path 2: LoadKey (chỉ khi privilege thực sự được grant) ---
+            ntuser = profile_paths.get(sid, "")
+            if ntuser and has_load_privilege:
+                mount_key = f"_WICA_TEMP_{sid[-8:]}"
+                try:
+                    winreg.LoadKey(winreg.HKEY_USERS, mount_key, ntuser)
+                    try:
+                        mk = winreg.CreateKeyEx(winreg.HKEY_USERS,
+                                                f"{mount_key}\\{key_path}", 0,
+                                                winreg.KEY_SET_VALUE)
+                        winreg.SetValueEx(mk, value_name, 0, value_type, value)
+                        winreg.CloseKey(mk)
+                        ok_count += 1
+                        _audit("REGISTRY_ALL_USERS", f"SID={sid} written via LoadKey", "OK")
+                    except Exception as e:
+                        fail_count += 1
+                        errors.append(f"SID {sid} (LoadKey write): {e}")
+                    finally:
+                        try:
+                            winreg.UnloadKey(winreg.HKEY_USERS, mount_key)
+                        except Exception:
+                            pass
+                    continue
+                except OSError as e:
+                    if e.winerror == 32:
+                        # NTUSER.DAT bị lock — user đang login, hive phải đã loaded
+                        # Thử lại direct write (có thể vừa được load bởi session khác)
+                        try:
+                            key = winreg.CreateKeyEx(winreg.HKEY_USERS, full_path, 0,
+                                                     winreg.KEY_SET_VALUE)
+                            winreg.SetValueEx(key, value_name, 0, value_type, value)
+                            winreg.CloseKey(key)
+                            ok_count += 1
+                            _audit("REGISTRY_ALL_USERS", f"SID={sid} written directly (NTUSER locked)", "OK")
+                            continue
+                        except Exception:
+                            pass  # Fall through to HKCU fallback
+                    else:
+                        _audit("REGISTRY_ALL_USERS", f"SID={sid} LoadKey error: {e}", "WARN")
+                except PermissionError as e:
+                    _audit("REGISTRY_ALL_USERS", f"SID={sid} LoadKey permission: {e}", "WARN")
+
+            # --- Path 3: HKCU fallback (user đang login = HKCU là của họ) ---
+            try:
+                key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0,
+                                         winreg.KEY_SET_VALUE)
+                winreg.SetValueEx(key, value_name, 0, value_type, value)
+                winreg.CloseKey(key)
+                ok_count += 1
+                _audit("REGISTRY_ALL_USERS", f"SID={sid} written via HKCU fallback", "OK")
+            except Exception as e2:
+                fail_count += 1
+                errors.append(f"SID {sid}: {e2}")
+    else:
+        # Không tìm thấy SID nào → fallback HKCU
+        _audit("REGISTRY_ALL_USERS", f"no SIDs, fallback HKCU key={key_path} {value_name}={value}")
         try:
-            key = winreg.CreateKeyEx(winreg.HKEY_USERS, full_path, 0,
+            key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0,
                                      winreg.KEY_SET_VALUE)
             winreg.SetValueEx(key, value_name, 0, value_type, value)
             winreg.CloseKey(key)
             ok_count += 1
         except PermissionError:
             fail_count += 1
-            errors.append(f"SID {sid}: cần quyền Admin")
+            errors.append("HKCU: cần quyền Admin")
         except Exception as e:
             fail_count += 1
-            errors.append(f"SID {sid}: {e}")
+            errors.append(f"HKCU: {e}")
+
     _audit("REGISTRY_ALL_USERS_RESULT",
            f"ok={ok_count} fail={fail_count}",
            "OK" if fail_count == 0 else "WARN")
+
+    # Ghi vào Default profile cho user mới tạo sau
+    default_result = _apply_to_default_profile(key_path, value_name, value, value_type)
+    if default_result:
+        ok_count += 1
+    else:
+        _audit("DEFAULT_PROFILE", "skipped or failed", "WARN")
+
     return ok_count, fail_count, errors
 
 
@@ -476,7 +696,7 @@ def _get_user_dirs() -> list[str]:
     Không quét ổ đĩa — chỉ đọc 1 folder cố định.
     Bỏ qua: Public, Default User (junction), All Users (junction).
     """
-    users_dir = os.path.join(os.environ.get("SystemDrive", "C:"), os.sep, "Users")
+    users_dir = os.path.join(os.environ.get("SystemDrive", "C:") + os.sep, "Users")
     skip = {"public", "default user", "all users"}
     dirs = []
     try:
@@ -591,8 +811,8 @@ def install_fonts(source_folder: str) -> str:
                 winreg.SetValueEx(key, f"{font_name} {reg_type}", 0,
                                   winreg.REG_SZ, fname)
                 winreg.CloseKey(key)
-            except Exception:
-                pass  # Font đã copy, registry fail không critical
+            except Exception as e:
+                _audit("FONT_REGISTRY", f"register {fname} failed: {e}", "WARN")
             ok_count += 1
         except PermissionError:
             fail_count += 1
@@ -609,15 +829,17 @@ def install_fonts(source_folder: str) -> str:
 # --- Pre-check functions (skip-if-already-done) ---
 
 def _is_winget_installed(pkg_id: str) -> bool:
-    """Kiểm tra nhanh package đã cài chưa bằng winget list --id.
+    """Kiểm tra nhanh package đã cài chưa.
 
-    EDR-safe: chỉ gọi winget.exe trực tiếp.
-    Timeout ngắn (15s) vì chỉ cần check, không cài.
+    EDR-safe: chỉ dùng winreg + winget.exe.
 
-    Khi chạy Run as different user/Admin, winget source của user đó
-    có thể chưa init → thử cả --scope machine (cài machine-wide
-    thì user nào query cũng thấy).
+    Ưu tiên check registry trước (instant, hoạt động bất kể user context).
+    Chỉ gọi winget list nếu registry không tìm thấy (chậm hơn, có thể timeout).
     """
+    # Check registry trước — nhanh, không phụ thuộc user context
+    if _is_installed_via_registry(pkg_id):
+        return True
+    # Fallback: winget list (chậm hơn nhưng chính xác hơn cho một số app)
     try:
         proc = subprocess.Popen(
             ["winget", "list", "--id", pkg_id, "-e",
@@ -627,28 +849,17 @@ def _is_winget_installed(pkg_id: str) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=CREATE_NO_WINDOW,
         )
-        stdout, stderr = proc.communicate(timeout=15)
-        try:
-            if proc.stdout:
-                proc.stdout.close()
-            if proc.stderr:
-                proc.stderr.close()
-            proc.wait(timeout=5)
-        except Exception:
-            pass
-        # winget list trả về bảng có chứa pkg_id nếu đã cài
+        stdout, stderr = proc.communicate(timeout=WINGET_CHECK_TIMEOUT)
         if proc.returncode == 0 and pkg_id.lower() in stdout.lower():
             return True
-        # Fallback: check "already installed" trong output
         combined = (stdout + stderr).lower()
         if "already installed" in combined:
             return True
     except Exception:
         pass
-    # Fallback 2: check trực tiếp trong registry Uninstall keys
-    # (hoạt động bất kể user context nào, không cần winget source)
-    return _is_installed_via_registry(pkg_id)
+    return False
 
 
 def _is_installed_via_registry(pkg_id: str) -> bool:
@@ -665,6 +876,8 @@ def _is_installed_via_registry(pkg_id: str) -> bool:
     uninstall_paths = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        # Per-user installs (Store apps, user-scoped installers)
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
     ]
     for hive, path in uninstall_paths:
         try:
@@ -715,16 +928,9 @@ def _get_installed_list() -> set:
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=CREATE_NO_WINDOW,
         )
-        stdout, _ = proc.communicate(timeout=30)
-        try:
-            if proc.stdout:
-                proc.stdout.close()
-            if proc.stderr:
-                proc.stderr.close()
-            proc.wait(timeout=5)
-        except Exception:
-            pass
+        stdout, _ = proc.communicate(timeout=WINGET_LIST_TIMEOUT)
         if proc.returncode == 0:
             for line in stdout.lower().split("\n"):
                 installed.add(line.strip())
@@ -852,8 +1058,13 @@ class SoftwareManager:
     }
 
     def __init__(self, aliases: dict, local_paths: list[str] = None):
+        # M7: validate alias keys are lowercase
+        bad_keys = [k for k in aliases if k != k.lower()]
+        if bad_keys:
+            _audit("ALIAS_WARN", f"non-lowercase alias keys: {bad_keys}", "WARN")
         self.aliases = aliases
         self.local_paths = local_paths or []
+        self._source_ready = False  # Flag: đã init source trong session này chưa
 
     def _resolve(self, name: str) -> str:
         return self.aliases.get(name.lower().strip(), name)
@@ -907,38 +1118,64 @@ class SoftwareManager:
 
     def _ensure_source(self) -> None:
         """Reset + update winget source (fix 0x8a15000f khi Run as Admin).
-        
+
         Khi chạy Run as different user, winget source data chưa có.
         Cần reset → update → accept agreements cho user mới.
+        Emit progress qua callback để UI không bị đứng im.
         """
-        _audit("SOURCE_RESET", "resetting winget source for current user")
+        def _emit(msg: str):
+            _audit("SOURCE_RESET", msg)
+            with _cb_lock:
+                cb = _progress_callback
+            if cb:
+                cb(msg)
+
+        _emit("Đang khởi tạo winget source (lần đầu chạy Admin)...")
+
         # Reset trước (xóa cache cũ/hỏng)
+        _emit("  [1/3] Đang reset winget source...")
         subprocess.run(
             ["winget", "source", "reset", "--force",
              "--accept-source-agreements", "--disable-interactivity"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=120
+            text=True, encoding="utf-8", errors="replace",
+            timeout=SOURCE_RESET_TIMEOUT,
+            creationflags=CREATE_NO_WINDOW,
         )
+
         # Update lại — download source index mới
-        _audit("SOURCE_UPDATE", "updating winget source")
+        _emit("  [2/3] Đang cập nhật winget source index (có thể mất 1-2 phút)...")
         subprocess.run(
             ["winget", "source", "update",
              "--accept-source-agreements", "--disable-interactivity"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=180
+            text=True, encoding="utf-8", errors="replace",
+            timeout=SOURCE_UPDATE_TIMEOUT,
+            creationflags=CREATE_NO_WINDOW,
         )
+
         # Chạy 1 lệnh search nhỏ để force winget init hoàn tất
+        _emit("  [3/3] Đang hoàn tất khởi tạo winget...")
         subprocess.run(
             ["winget", "search", "Microsoft.Office",
              "--accept-source-agreements", "--disable-interactivity"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=120
+            text=True, encoding="utf-8", errors="replace",
+            timeout=SOURCE_RESET_TIMEOUT,
+            creationflags=CREATE_NO_WINDOW,
         )
+        _emit("  Winget source sẵn sàng.")
+        self._source_ready = True
 
     def install(self, package: str) -> str:
         """Cài qua winget - Microsoft-signed, EDR trusted."""
         pkg_id = self._resolve(package)
         _audit("INSTALL", f"package={package} resolved={pkg_id}")
+        # Emit thông báo ngay để UI không đứng im khi winget đang init
+        with _cb_lock:
+            cb = _progress_callback
+        if cb:
+            cb(f"Đang kết nối winget để cài {package}...")
         args = [
             "install", "--id", pkg_id,
             "--accept-package-agreements",
@@ -955,8 +1192,13 @@ class SoftwareManager:
               or "data required by the source" in output.lower()
               or "failed when opening source" in output.lower()):
             # Source chưa sẵn sàng — reset + update rồi thử lại
-            _audit("INSTALL_RETRY", f"source error, resetting and retrying {pkg_id}")
-            self._ensure_source()
+            # Chỉ reset 1 lần mỗi session để tránh lặp lại
+            if not self._source_ready:
+                _audit("INSTALL_RETRY", f"source error, resetting and retrying {pkg_id}")
+                self._ensure_source()
+                self._source_ready = True
+            else:
+                _audit("INSTALL_RETRY", f"source already reset this session, retrying {pkg_id}")
             # Retry KHÔNG dùng --source winget (để winget tự chọn source khả dụng)
             retry_args = [
                 "install", "--id", pkg_id,
@@ -999,7 +1241,7 @@ class SoftwareManager:
         pkg_id = self._resolve(package)
         _audit("UNINSTALL", f"package={package} resolved={pkg_id}")
         args = ["uninstall", "--id", pkg_id, "-e"]
-        code, output = _run_winget(args)
+        code, output = _run_winget_progress(args)
         if code == 0:
             return f"[ok] \u0110\u00e3 g\u1ee1: {package}"
         else:
@@ -1010,7 +1252,8 @@ class SoftwareManager:
         """Gỡ app system-wide (tất cả user) qua winget."""
         _audit("UNINSTALL_SYSTEM", f"package={pkg_id}")
         args = ["uninstall", "--id", pkg_id, "-e", "--accept-source-agreements"]
-        code, output = _run_winget(args, timeout=60)
+        # M4: uninstall_system uses shorter timeout
+        code, output = _run_winget_progress(args, timeout=CLI_TIMEOUT)
         if code == 0:
             return f"[ok] Đã gỡ: {pkg_id}"
         elif "no installed package" in output.lower() or "not found" in output.lower():
@@ -1020,7 +1263,7 @@ class SoftwareManager:
 
     def search(self, query: str) -> str:
         _audit("SEARCH", f"query={query}")
-        code, output = _run_winget(["search", query])
+        code, output = _run_winget_progress(["search", query])
         if code == 0:
             lines = output.split("\n")[:15]
             return "[search] K\u1ebft qu\u1ea3 t\u00ecm ki\u1ebfm:\n" + "\n".join(lines)
@@ -1028,7 +1271,7 @@ class SoftwareManager:
 
     def list_installed(self) -> str:
         _audit("LIST", "listing installed")
-        code, output = _run_winget(["list"])
+        code, output = _run_winget_progress(["list"])
         if code == 0:
             lines = output.split("\n")[:30]
             return "[list] Ph\u1ea7n m\u1ec1m \u0111\u00e3 c\u00e0i:\n" + "\n".join(lines)
@@ -1074,7 +1317,7 @@ class SoftwareManager:
             "--accept-package-agreements",
             "--accept-source-agreements",
         ]
-        code, output = _run_winget_progress(args, timeout=1200)
+        code, output = _run_winget_progress(args, timeout=WINGET_UPGRADE_TIMEOUT)
         if code == 0:
             return "[ok] Đã cập nhật tất cả phần mềm."
         elif "no applicable update" in output.lower() or "no installed package" in output.lower():
@@ -1089,7 +1332,7 @@ class SoftwareManager:
         file_path = file_path.strip().strip('"').strip("'")
         _audit("EXPORT_APPS", f"path={file_path}")
         args = ["export", "-o", file_path, "--accept-source-agreements"]
-        code, output = _run_winget(args)
+        code, output = _run_winget_progress(args)
         if code == 0:
             return f"[ok] Đã xuất danh sách phần mềm: {file_path}"
         else:
@@ -1308,7 +1551,21 @@ class SystemConfigurator:
                 total_fail += fail_c
                 errors.extend(errs)
             if total_fail > 0 and total_ok == 0:
-                return f"[error] Config {config_name}: không áp dụng được cho user nào\n" + "\n".join(errors)
+                # Fallback: ghi trực tiếp vào HKCU của user hiện tại
+                fb_errors = []
+                for value_name, value_data, value_type in reg_cfg["values"]:
+                    ok, msg = _set_registry(
+                        winreg.HKEY_CURRENT_USER, key_path,
+                        value_name, value_data, value_type
+                    )
+                    if not ok:
+                        fb_errors.append(msg)
+                if not fb_errors:
+                    return f"[ok] Đã áp dụng (user hiện tại): {config_name}"
+                err_detail = "; ".join(errors[:2]) if errors else "unknown"
+                return (f"[error] Config {config_name}: không áp dụng được\n"
+                        f"  Chi tiết: {err_detail}\n"
+                        f"  Gợi ý: chạy WICA với quyền Admin (Run as Administrator)")
             if errors:
                 return (f"[warn] Config {config_name}: áp dụng {total_ok} user, "
                         f"lỗi {total_fail}\n" + "\n".join(errors[:3]))
@@ -1341,16 +1598,9 @@ class SystemConfigurator:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                creationflags=CREATE_NO_WINDOW,
             )
-            stdout, stderr = proc.communicate(timeout=30)
-            try:
-                if proc.stdout:
-                    proc.stdout.close()
-                if proc.stderr:
-                    proc.stderr.close()
-                proc.wait(timeout=5)
-            except Exception:
-                pass
+            stdout, stderr = proc.communicate(timeout=TIMEZONE_TIMEOUT)
             if proc.returncode == 0:
                 _audit("TIMEZONE_RESULT", f"set to {tz_id}", "OK")
                 # Force sync clock để giờ update ngay
@@ -1359,16 +1609,9 @@ class SystemConfigurator:
                         ["w32tm", "/resync", "/nowait"],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
+                        creationflags=CREATE_NO_WINDOW,
                     )
-                    sync.communicate(timeout=10)
-                    try:
-                        if sync.stdout:
-                            sync.stdout.close()
-                        if sync.stderr:
-                            sync.stderr.close()
-                        sync.wait(timeout=5)
-                    except Exception:
-                        pass
+                    sync.communicate(timeout=WINGET_CHECK_TIMEOUT)
                 except Exception:
                     pass
                 return f"[ok] Đã đặt timezone: {tz_id}"
@@ -1461,80 +1704,184 @@ class SystemConfigurator:
 
 
 # --- CLI Command Runner ---
-# Whitelist các lệnh an toàn cho phép chạy trực tiếp
-# KHÔNG có powershell, cmd, hoặc bất kỳ shell nào
-_CLI_WHITELIST = {
-    # Network
-    "ipconfig", "ping", "tracert", "nslookup", "netstat", "arp",
-    "route", "pathping", "nbtstat", "getmac",
-    # System info
-    "hostname", "whoami", "systeminfo", "ver", "wmic",
-    "tasklist", "taskkill", "sc",
-    # File operations (read-only / safe)
-    "dir", "type", "where", "tree", "attrib", "icacls",
-    "certutil", "cipher",
-    # Winget
-    "winget",
-    # Disk
-    "chkdsk", "diskpart", "fsutil",
-    # Network config
-    "netsh",
-    # DNS
-    "ipconfig",
-    # Other safe tools
-    "sfc", "dism", "gpresult", "gpupdate",
-    "bcdedit", "shutdown", "tzutil",
-    "reg",  # registry query (read)
-}
-
-# Lệnh CẤM TUYỆT ĐỐI - không bao giờ chạy
-_CLI_BLACKLIST = {
-    "powershell", "powershell.exe", "pwsh", "pwsh.exe",
-    "cmd", "cmd.exe",
-    "wscript", "wscript.exe", "cscript", "cscript.exe",
-    "mshta", "mshta.exe",
-    "rundll32", "rundll32.exe",
-    "regsvr32", "regsvr32.exe",
-    "format",  # format disk
-}
+# Whitelist/Blacklist imported from shared_constants (single source of truth)
+_CLI_WHITELIST = CLI_WHITELIST
+_CLI_BLACKLIST = CLI_BLACKLIST
 
 
-def _run_cli_command(command_str: str, timeout: int = 60) -> str:
+def _run_cli_command(command_str: str, timeout: int = CLI_TIMEOUT) -> str:
     """Chạy lệnh CLI trực tiếp - CHỈ whitelist, KHÔNG shell=True.
-    
-    EDR Safety:
+
+    EDR Safety (enterprise-grade):
     - KHÔNG dùng shell=True
-    - KHÔNG spawn PowerShell/cmd
+    - KHÔNG spawn PowerShell/cmd/diskpart/bcdedit
     - Chỉ chạy lệnh trong whitelist
+    - Arg-level restrictions cho certutil, netsh, sc, taskkill, shutdown, icacls, cipher
     - Tất cả được audit log
     """
     command_str = command_str.strip()
     if not command_str:
         return "[error] Lệnh trống"
-    
+
     _audit("CLI_CMD", f"raw={command_str}")
-    
-    # Parse command - tách thành list args
-    # Xử lý đặc biệt cho Windows path (không dùng shlex vì nó xử lý \ sai)
-    parts = command_str.split()
+
+    # Parse command — shlex.split(posix=False) cho Windows path
+    import shlex
+    try:
+        parts = shlex.split(command_str, posix=False)
+        parts = [p.strip('"') if p.startswith('"') and p.endswith('"') else p for p in parts]
+    except ValueError:
+        parts = command_str.split()
     if not parts:
         return "[error] Lệnh trống"
-    
+
     exe = parts[0].lower().strip('"').strip("'")
-    # Bỏ .exe nếu có để so sánh
     exe_base = exe.replace(".exe", "")
-    
-    # Kiểm tra blacklist trước
+    args_lower = [a.lower() for a in parts[1:]]
+
+    # --- Blacklist check ---
     if exe_base in _CLI_BLACKLIST or exe in _CLI_BLACKLIST:
         _audit("CLI_BLOCKED", f"blacklisted: {exe}", "FAIL")
-        return f"[error] Lệnh bị chặn (EDR safety): {exe}\nKhông được phép chạy shell/script interpreter."
-    
-    # Kiểm tra whitelist
+        return f"[error] Lệnh bị chặn (EDR safety): {exe}"
+
+    # --- Whitelist check ---
     if exe_base not in _CLI_WHITELIST and exe not in _CLI_WHITELIST:
         _audit("CLI_BLOCKED", f"not whitelisted: {exe}", "FAIL")
         allowed = ", ".join(sorted(_CLI_WHITELIST)[:15]) + "..."
         return f"[error] Lệnh '{exe}' không nằm trong danh sách cho phép.\nCho phép: {allowed}"
-    
+
+    # --- Arg-level restrictions ---
+
+    # reg: chỉ cho phép query/export
+    if exe_base == "reg":
+        if args_lower and args_lower[0] in ("add", "delete", "import", "restore",
+                                             "load", "unload", "save", "copy"):
+            _audit("CLI_BLOCKED", f"reg {args_lower[0]} blocked", "FAIL")
+            return f"[error] 'reg {args_lower[0]}' bị chặn. Chỉ cho phép: reg query, reg export."
+
+    # certutil: LOLBin — chỉ cho phép sub-commands an toàn
+    elif exe_base == "certutil":
+        # Tìm sub-command (arg bắt đầu bằng -)
+        subcmd = next((a for a in args_lower if a.startswith("-")), None)
+        if subcmd and subcmd not in _CERTUTIL_ALLOWED_SUBCMDS:
+            _audit("CLI_BLOCKED", f"certutil {subcmd} blocked (LOLBin risk)", "FAIL")
+            allowed_sub = ", ".join(sorted(_CERTUTIL_ALLOWED_SUBCMDS))
+            return (f"[error] 'certutil {subcmd}' bị chặn (LOLBin risk).\n"
+                    f"Cho phép: {allowed_sub}")
+
+    # netsh: chặn advfirewall và firewall sub-commands
+    elif exe_base == "netsh":
+        if args_lower and args_lower[0] in _NETSH_BLOCKED_SUBCOMMANDS:
+            _audit("CLI_BLOCKED", f"netsh {args_lower[0]} blocked", "FAIL")
+            return (f"[error] 'netsh {args_lower[0]}' bị chặn (firewall manipulation risk).\n"
+                    f"Cho phép: netsh wlan, netsh interface show, netsh int ip show, v.v.")
+        # Chặn write operations nguy hiểm: winsock reset, int ip reset, winhttp set
+        if len(args_lower) >= 2:
+            pair = (args_lower[0], args_lower[1])
+            if pair in _NETSH_BLOCKED_WRITE_SUBCMDS:
+                _audit("CLI_BLOCKED", f"netsh {args_lower[0]} {args_lower[1]} blocked", "FAIL")
+                return (f"[error] 'netsh {args_lower[0]} {args_lower[1]}' bị chặn (network stack modification).\n"
+                        f"Thao tác này cần approval của IT admin.")
+        # Chặn thêm: netsh interface ip set (có thể đổi DNS/IP)
+        if (len(args_lower) >= 3
+                and args_lower[0] == "interface"
+                and args_lower[2] == "set"):
+            _audit("CLI_BLOCKED", f"netsh interface ... set blocked", "FAIL")
+            return "[error] 'netsh interface ... set' bị chặn. Chỉ cho phép lệnh show/dump."
+
+    # sc: chặn stop/delete/config các security service
+    elif exe_base == "sc":
+        if args_lower:
+            # sc [\\server] action service_name
+            # Tìm action (bỏ qua \\server nếu có)
+            action_idx = 0
+            if args_lower[0].startswith("\\\\"):
+                action_idx = 1
+            action = args_lower[action_idx] if action_idx < len(args_lower) else ""
+            svc_name = args_lower[action_idx + 1] if action_idx + 1 < len(args_lower) else ""
+
+            if action in _SC_BLOCKED_ACTIONS:
+                # Kiểm tra tên service có phải security service không
+                svc_lower = svc_name.lower()
+                for blocked in _SC_BLOCKED_SERVICES:
+                    if blocked in svc_lower:
+                        _audit("CLI_BLOCKED",
+                               f"sc {action} {svc_name} blocked (security service)", "FAIL")
+                        return (f"[error] 'sc {action} {svc_name}' bị chặn.\n"
+                                f"Không được phép dừng/xóa/cấu hình security service.")
+
+    # taskkill: chặn kill security processes
+    elif exe_base == "taskkill":
+        # Tìm /IM argument (image name)
+        for i, arg in enumerate(args_lower):
+            if arg == "/im" and i + 1 < len(args_lower):
+                proc_name = args_lower[i + 1].lower()
+                if proc_name in _TASKKILL_BLOCKED_PROCESSES:
+                    _audit("CLI_BLOCKED", f"taskkill /IM {proc_name} blocked", "FAIL")
+                    return (f"[error] Không được phép kill process: {proc_name}\n"
+                            f"Đây là security/EDR process được bảo vệ.")
+
+    # shutdown: chỉ cho phép /a (abort)
+    elif exe_base == "shutdown":
+        flags = set(args_lower)
+        allowed = flags & _SHUTDOWN_ALLOWED_FLAGS
+        blocked = flags - _SHUTDOWN_ALLOWED_FLAGS - {""}
+        if blocked and not allowed:
+            _audit("CLI_BLOCKED", f"shutdown {' '.join(blocked)} blocked", "FAIL")
+            return (f"[error] 'shutdown {' '.join(blocked)}' bị chặn.\n"
+                    f"Chỉ cho phép: shutdown /a (hủy shutdown đang chờ).")
+
+    # icacls: chỉ cho phép read — chặn modify ACL
+    elif exe_base == "icacls":
+        for flag in args_lower:
+            if flag in _ICACLS_BLOCKED_FLAGS:
+                _audit("CLI_BLOCKED", f"icacls {flag} blocked", "FAIL")
+                return (f"[error] 'icacls {flag}' bị chặn (ACL modification risk).\n"
+                        f"Chỉ cho phép đọc ACL: icacls <path>")
+
+    # cipher: chặn /w (wipe free space)
+    elif exe_base == "cipher":
+        for flag in args_lower:
+            if flag in _CIPHER_BLOCKED_FLAGS:
+                _audit("CLI_BLOCKED", f"cipher {flag} blocked", "FAIL")
+                return (f"[error] 'cipher {flag}' bị chặn (disk wipe risk).")
+
+    # fsutil: chặn write/behavior sub-commands
+    elif exe_base == "fsutil":
+        if args_lower and args_lower[0] in _FSUTIL_BLOCKED_SUBCMDS:
+            _audit("CLI_BLOCKED", f"fsutil {args_lower[0]} blocked", "FAIL")
+            return (f"[error] 'fsutil {args_lower[0]}' bị chặn (filesystem modification risk).\n"
+                    f"Chỉ cho phép: fsutil volume diskfree, fsutil fsinfo, fsutil file, v.v.")
+
+    # dism: chặn enable/disable features và apply image
+    elif exe_base == "dism":
+        for flag in args_lower:
+            if flag in _DISM_BLOCKED_FLAGS:
+                _audit("CLI_BLOCKED", f"dism {flag} blocked", "FAIL")
+                return (f"[error] 'dism {flag}' bị chặn (system modification risk).\n"
+                        f"Chỉ cho phép: dism /online /get-features, /get-packages, /get-drivers.")
+
+    # wmic: deprecated warning nhưng vẫn cho phép (read-only queries)
+    elif exe_base == "wmic":
+        _audit("CLI_WARN", "wmic is deprecated in Win11 22H2+, consider using Get-CimInstance", "WARN")
+
+    # chkdsk: chặn /f /r /x — schedule repair và force reboot
+    elif exe_base == "chkdsk":
+        for flag in args_lower:
+            if flag in _CHKDSK_BLOCKED_FLAGS:
+                _audit("CLI_BLOCKED", f"chkdsk {flag} blocked", "FAIL")
+                return (f"[error] 'chkdsk {flag}' bị chặn (disk repair/reboot risk).\n"
+                        f"Chỉ cho phép: chkdsk <drive> (read-only scan).")
+
+    # w32tm: chặn /config — thay đổi NTP server
+    elif exe_base == "w32tm":
+        for flag in args_lower:
+            if flag in _W32TM_BLOCKED_FLAGS:
+                _audit("CLI_BLOCKED", f"w32tm {flag} blocked", "FAIL")
+                return (f"[error] 'w32tm {flag}' bị chặn.\n"
+                        f"Cho phép: w32tm /query, w32tm /resync.")
+
+    # --- Execute (real-time output) ---
     try:
         proc = subprocess.Popen(
             parts,
@@ -1543,32 +1890,44 @@ def _run_cli_command(command_str: str, timeout: int = 60) -> str:
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=CREATE_NO_WINDOW,
         )
-        stdout, stderr = proc.communicate(timeout=timeout)
-        # Cleanup pipe handles
+        # Đọc stdout real-time thay vì blocking communicate()
+        all_lines = []
+        start = time.time()
+        _seen_cli = set()
         try:
-            if proc.stdout:
-                proc.stdout.close()
-            if proc.stderr:
-                proc.stderr.close()
-            proc.wait(timeout=5)
+            for raw_line in proc.stdout:
+                if timeout and (time.time() - start) > timeout:
+                    proc.terminate()
+                    _audit("CLI_RESULT", f"{exe} timeout", "FAIL")
+                    return f"[error] Lệnh chạy quá lâu (>{timeout}s): {exe}"
+                stripped = raw_line.rstrip()
+                if stripped:
+                    all_lines.append(stripped)
+                    # Emit progress qua callback (real-time)
+                    _emit_line(stripped, _seen_cli)
         except Exception:
             pass
-        output = stdout.strip()
+        # Đọc stderr sau khi stdout đã hết
+        stderr = proc.stderr.read() if proc.stderr else ""
+        proc.wait()
+
+        output = "\n".join(all_lines).strip()
         if stderr.strip():
             output += "\n" + stderr.strip()
-        
+
         _audit("CLI_RESULT", f"cmd={exe} rc={proc.returncode}",
                "OK" if proc.returncode == 0 else "FAIL")
-        
+
         if not output:
             output = f"(Lệnh hoàn thành, exit code: {proc.returncode})"
-        
-        # Giới hạn output để không tràn chat
+
+        # Giới hạn output
         lines = output.split("\n")
-        if len(lines) > 50:
-            output = "\n".join(lines[:50]) + f"\n... (còn {len(lines) - 50} dòng)"
-        
+        if len(lines) > 100:
+            output = "\n".join(lines[:100]) + f"\n... (còn {len(lines) - 100} dòng)"
+
         return output
     except FileNotFoundError:
         _audit("CLI_RESULT", f"{exe} not found", "FAIL")
