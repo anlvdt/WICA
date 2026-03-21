@@ -2,3 +2,4 @@ openai>=1.0.0
 pyyaml>=6.0
 pywin32>=306
 pyinstaller>=6.0.0
+rarfile>=4.0  # optional: giải nén .rar (fallback dùng 7-Zip nếu không có)

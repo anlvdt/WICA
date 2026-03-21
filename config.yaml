@@ -81,12 +81,23 @@ aliases:
   "m365": "Microsoft.Office"
   teams: "Microsoft.Teams"
   "microsoft teams": "Microsoft.Teams"
+  # --- Phần mềm Thuế (Tổng cục Thuế - cài local từ C:\SoftVN\PMThue) ---
+  htkk: "htkk"
+  "htkk dll": "htkk_dll"
+  "phần mềm htkk": "htkk"
+  itaxviewer: "itaxviewer"
+  "itaxviewer dll": "itaxviewer_dll"
+  "itax viewer": "itaxviewer"
+  "ct signinghub": "ct_signinghub"
+  signinghub: "ct_signinghub"
+  "ký số signinghub": "ct_signinghub"
 
 # Thư mục chứa file cài đặt local (thử lần lượt, dùng cái nào tồn tại)
 local_paths:
   - "C:\\Ecom Softs"
   - "C:\\Temp\\SoftVN"
   - "C:\\SoftVN"
+  - "C:\\SoftVN\\PMThue"
   - "C:\\Software"
 
 # Bloatware cần gỡ (winget ID) - system-wide
@@ -167,6 +178,20 @@ profiles:
       # === BƯỚC 6: Bật lại UAC ===
       - {type: system_config, config: uac_on}
 
+  thue:
+    name: "Cài phần mềm Thuế (bản thường)"
+    actions:
+      - {type: install_htkk, path: "PMThue\\HTKK.rar", dll: false}
+      - {type: install_tax, path: "PMThue\\iTaxViewer.zip", shortcut: "iTaxViewer"}
+      - {type: install_tax, path: "PMThue\\CTSigningHub.rar", shortcut: "CT SigningHub"}
+
+  thue_dll:
+    name: "Cài phần mềm Thuế (bản DLL - dữ liệu lớn)"
+    actions:
+      - {type: install_htkk, path: "PMThue\\HTKK_DLL.rar", dll: true}
+      - {type: install_tax, path: "PMThue\\iTaxViewer_dll.zip", shortcut: "iTaxViewer"}
+      - {type: install_tax, path: "PMThue\\CTSigningHub.rar", shortcut: "CT SigningHub"}
+
 # === Quick Commands - Lệnh nhanh riêng lẻ ===
 # Gõ tên lệnh trong chat để chạy action tương ứng.
 # Không cần chạy cả profile, chỉ chạy 1 bước.
@@ -202,6 +227,33 @@ quick_commands:
     action: {type: install_local, path: "trendmicro_agent_cloud_x64.msi"}
   "officescan":
     action: {type: install_local, path: "trendmicro_agent_cloud_x64.msi"}
+  # --- Phần mềm Thuế (Tổng cục Thuế) ---
+  "htkk dll":
+    action: {type: install_htkk, path: "PMThue\\HTKK_DLL.rar", dll: true}
+  "htkk_dll":
+    action: {type: install_htkk, path: "PMThue\\HTKK_DLL.rar", dll: true}
+  "itaxviewer dll":
+    action: {type: install_tax, path: "PMThue\\iTaxViewer_dll.zip", shortcut: "iTaxViewer"}
+  "itaxviewer_dll":
+    action: {type: install_tax, path: "PMThue\\iTaxViewer_dll.zip", shortcut: "iTaxViewer"}
+  "ct signinghub":
+    action: {type: install_tax, path: "PMThue\\CTSigningHub.rar", shortcut: "CT SigningHub"}
+  "signinghub":
+    action: {type: install_tax, path: "PMThue\\CTSigningHub.rar", shortcut: "CT SigningHub"}
+  "htkk":
+    action: {type: install_htkk, path: "PMThue\\HTKK.rar", dll: false}
+  "phần mềm htkk":
+    action: {type: install_htkk, path: "PMThue\\HTKK.rar", dll: false}
+  "itaxviewer":
+    action: {type: install_tax, path: "PMThue\\iTaxViewer.zip", shortcut: "iTaxViewer"}
+  "itax viewer":
+    action: {type: install_tax, path: "PMThue\\iTaxViewer.zip", shortcut: "iTaxViewer"}
+  "cài phần mềm thuế":
+    action: {type: run_profile, name: "thue"}
+  "phần mềm thuế dll":
+    action: {type: run_profile, name: "thue_dll"}
+  "cài phần mềm thuế dll":
+    action: {type: run_profile, name: "thue_dll"}
   # --- Bloatware ---
   "gỡ bloatware":
     action: {type: remove_bloatware}

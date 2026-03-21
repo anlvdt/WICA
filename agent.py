@@ -10,7 +10,7 @@ import yaml
 import os
 import threading
 from openai import OpenAI
-from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, deploy_portable, set_progress_callback, _run_cli_command, copy_to_all_users, install_fonts, _is_winget_installed, _is_registry_set, _is_deployed, _are_fonts_installed, _is_copied_to_users, _get_installed_list
+from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, create_shortcut_admin, deploy_portable, set_progress_callback, _run_cli_command, copy_to_all_users, install_fonts, _is_winget_installed, _is_registry_set, _is_deployed, _are_fonts_installed, _is_copied_to_users, _get_installed_list
 from fast_commands import parse_fast
 from privilege import is_elevated
 from keystore import get_key
@@ -43,6 +43,8 @@ Khi hoàn thành hoặc không cần thêm actions:
 ## ACTION TYPES
 {{ "type": "install", "package": "tên/alias" }}
 {{ "type": "install_local", "path": "tên_file.exe" }}
+{{ "type": "install_htkk", "path": "file.rar", "dll": false }}
+{{ "type": "install_tax", "path": "file.zip", "shortcut": "Tên App" }}
 {{ "type": "uninstall", "package": "tên/alias" }}
 {{ "type": "search", "query": "từ_khóa" }}
 {{ "type": "list_installed" }}
@@ -398,7 +400,7 @@ class AntiGravityAgent:
 
         lines = []
         font_exts = {".ttf", ".otf", ".ttc"}
-        installer_exts = {".exe", ".msi", ".msix", ".msixbundle", ".appx"}
+        installer_exts = {".exe", ".msi", ".msix", ".msixbundle", ".appx", ".zip", ".rar"}
 
         def _scan(path: str, indent: int, depth: int):
             if depth < 0:
@@ -686,12 +688,21 @@ class AntiGravityAgent:
                 return full
         # 2. Tìm trong thư mục con (max 3 cấp) — chỉ trong search_paths whitelist
         target_name = os.path.basename(path).lower()
+        target_dir  = os.path.dirname(path)  # vd: "PMThue" nếu path = "PMThue\\HTKK..."
         for base in search_paths:
-            # Tìm file
-            found = self._find_in_subfolders(base, target_name, max_depth=3)
+            search_base = os.path.join(base, target_dir) if target_dir else base
+            # Tìm file chính xác
+            found = self._find_in_subfolders(search_base, target_name, max_depth=3)
             if found:
                 _audit("RESOLVE_PATH", f"found in subfolder: {found}", "OK")
                 return found
+            # 3. Tìm theo prefix (bỏ qua version trong tên file)
+            #    vd: "HTKK_v5.6.2_signed.rar" → prefix "htkk"
+            #    Dùng khi file được cập nhật phiên bản mới
+            found_fuzzy = self._find_by_prefix(search_base, target_name)
+            if found_fuzzy:
+                _audit("RESOLVE_PATH", f"found by prefix match: {found_fuzzy}", "OK")
+                return found_fuzzy
             # Tìm folder (install_fonts, deploy_portable truyền folder path)
             found_dir = self._find_dir_in_subfolders(base, target_name, max_depth=3)
             if found_dir:
@@ -700,6 +711,63 @@ class AntiGravityAgent:
         tried = ", ".join(search_paths) if search_paths else "(chưa cấu hình local_paths)"
         _audit("RESOLVE_PATH", f"not found: {path} in {tried}", "FAIL")
         return path
+
+    @staticmethod
+    def _find_by_prefix(directory: str, filename_lower: str) -> str:
+        """Tìm file theo prefix — bỏ qua phần version trong tên.
+
+        Logic:
+        - Lấy prefix = phần đầu tên file trước số version hoặc ký tự '_v'/'_V'
+          vd: "htkk_v5.6.2_signed.rar" → prefix "htkk"
+              "itaxviewer2.7.1.zip"    → prefix "itaxviewer"
+              "ctsigninghub_signed_1.2.rar" → prefix "ctsigninghub"
+        - Tìm tất cả file trong directory có cùng extension và bắt đầu bằng prefix
+        - Trả về file mới nhất (mtime lớn nhất) nếu có nhiều kết quả
+
+        EDR-safe: chỉ dùng os.scandir (Python stdlib).
+        """
+        import re as _re
+
+        if not os.path.isdir(directory):
+            return ""
+
+        name_no_ext, ext = os.path.splitext(filename_lower)
+        # Tách prefix: lấy phần trước _v<số>, _<số>, hoặc <số> đầu tiên
+        prefix_match = _re.match(r"^([a-z]+)", name_no_ext)
+        if not prefix_match:
+            return ""
+        prefix = prefix_match.group(1)  # vd: "htkk", "itaxviewer", "ctsigninghub"
+
+        archive_exts = {".zip", ".rar", ".7z"}
+        installer_exts = {".exe", ".msi", ".msix"}
+        # Nếu ext là archive → tìm archive; nếu là installer → tìm installer
+        if ext in archive_exts:
+            valid_exts = archive_exts
+        elif ext in installer_exts:
+            valid_exts = installer_exts
+        else:
+            valid_exts = {ext}
+
+        candidates = []
+        try:
+            for entry in os.scandir(directory):
+                if not entry.is_file():
+                    continue
+                e_lower = entry.name.lower()
+                e_ext = os.path.splitext(e_lower)[1]
+                if e_ext not in valid_exts:
+                    continue
+                if e_lower.startswith(prefix):
+                    candidates.append(entry)
+        except (PermissionError, OSError):
+            return ""
+
+        if not candidates:
+            return ""
+        # Trả về file mới nhất nếu nhiều kết quả
+        candidates.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+        return candidates[0].path
+
 
     @staticmethod
     def _find_dir_in_subfolders(base: str, dirname_lower: str, max_depth: int = 3) -> str:
@@ -850,6 +918,11 @@ class AntiGravityAgent:
             elif "localoffice" in path_lower or "desktopcentral" in path_lower or "uems" in path_lower or "manageengine" in path_lower:
                 if _is_installed_via_registry("ManageEngine") or _is_installed_via_registry("Desktop Central") or _is_installed_via_registry("UEMS"):
                     return "đã cài rồi"
+        elif t == "install_tax":
+            # Không skip phần mềm thuế — luôn cho phép cài/update
+            # (version mới có thể cài đè, trừ HTKK)
+            pass
+        # install_htkk: không skip — hàm tự xử lý gỡ cũ + cài mới
         return None
 
     def _execute_action(self, action: dict, from_llm: bool = False) -> str:
@@ -864,7 +937,7 @@ class AntiGravityAgent:
         # === SMART SKIP — áp dụng toàn diện cho mọi flow ===
         skip_types = {"install", "uninstall", "system_config", "set_hostname",
                       "deploy_portable", "install_fonts", "copy_to_all_users",
-                      "remove_bloatware", "install_local"}
+                      "remove_bloatware", "install_local", "install_htkk", "install_tax"}
         if t in skip_types:
             skip_reason = self._check_skip(action)
             if skip_reason:
@@ -881,6 +954,20 @@ class AntiGravityAgent:
                 _audit("PATH_BLOCKED", f"unsafe path from LLM: {path}", "FAIL")
                 return f"[error] Đường dẫn không được phép: {path}"
             return self.sw.install_local(path)
+        elif t == "install_htkk":
+            path = self._resolve_local_path(action.get("path", ""))
+            if from_llm and not self._is_safe_path(path):
+                _audit("PATH_BLOCKED", f"unsafe path from LLM: {path}", "FAIL")
+                return f"[error] Đường dẫn không được phép: {path}"
+            dll_ver = action.get("dll", False)
+            return self.sw.install_htkk(path, dll_version=dll_ver)
+        elif t == "install_tax":
+            path = self._resolve_local_path(action.get("path", ""))
+            if from_llm and not self._is_safe_path(path):
+                _audit("PATH_BLOCKED", f"unsafe path from LLM: {path}", "FAIL")
+                return f"[error] Đường dẫn không được phép: {path}"
+            shortcut_name = action.get("shortcut", "")
+            return self.sw.install_tax_app(path, shortcut_name)
         elif t == "uninstall":
             return self.sw.uninstall(action.get("package", ""))
         elif t == "search":
@@ -999,6 +1086,10 @@ class AntiGravityAgent:
                        f"[...] Đang cài đặt: {action.get('package', '')}..."),
             "install_local": (f"Cài từ file: {os.path.basename(action.get('path', ''))}",
                              f"[...] Đang mở installer: {os.path.basename(action.get('path', ''))}..."),
+            "install_htkk": (f"Cài HTKK: {os.path.basename(action.get('path', ''))}",
+                            f"[...] Đang gỡ HTKK cũ + cài mới + tạo shortcut Admin..."),
+            "install_tax": (f"Cài PM Thuế: {action.get('shortcut', os.path.basename(action.get('path', '')))}",
+                           f"[...] Đang cài + tạo shortcut Admin: {action.get('shortcut', '')}..."),
             "uninstall": (f"Gỡ {action.get('package', '')}",
                          f"[...] Đang gỡ: {action.get('package', '')}..."),
             "search": (f"Tìm {action.get('query', '')}",

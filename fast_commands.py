@@ -69,6 +69,19 @@ SETUP_NEW_PATTERNS = [
     r"(?:máy mới|may moi)",
 ]
 
+SETUP_TAX_PATTERNS = [
+    r"(?:cài|cai|setup|chạy|chay|run)\s+(?:ph[aầ]n m[eề]m\s+)?thu[eế](?!\s*dll)",
+    r"(?:profile|ch[aạ]y profile)\s+thu[eế](?!\s*dll)",
+    r"ph[aầ]n m[eề]m\s+thu[eế](?!\s*dll)",
+]
+
+SETUP_TAX_DLL_PATTERNS = [
+    r"(?:cài|cai|setup|chạy|chay|run)\s+(?:ph[aầ]n m[eề]m\s+)?thu[eế]\s*dll",
+    r"(?:profile|ch[aạ]y profile)\s+thu[eế]\s*dll",
+    r"ph[aầ]n m[eề]m\s+thu[eế]\s*dll",
+    r"thu[eế]\s*dll",
+]
+
 LIST_PROFILE_PATTERNS = [
     r"(?:danh sách|danh sach|xem|list)\s+profile",
     r"profile\s*$",
@@ -216,6 +229,16 @@ def parse_fast(text: str, quick_commands: dict = None) -> list[dict] | None:
         if re.search(p, text_lower):
             return [{"type": "run_profile", "name": "mac_dinh"}]
 
+    # Setup phần mềm thuế = chạy profile thue
+    for p in SETUP_TAX_PATTERNS:
+        if re.search(p, text_lower):
+            return [{"type": "run_profile", "name": "thue"}]
+
+    # Setup phần mềm thuế DLL = chạy profile thue_dll
+    for p in SETUP_TAX_DLL_PATTERNS:
+        if re.search(p, text_lower):
+            return [{"type": "run_profile", "name": "thue_dll"}]
+
     # List profiles
     for p in LIST_PROFILE_PATTERNS:
         if re.search(p, text_lower):
@@ -307,6 +330,6 @@ def _looks_like_path(text: str) -> bool:
         return True
     if text.startswith("\\\\"):
         return True
-    if re.search(r"\.(exe|msi|msix)$", text.lower()):
+    if re.search(r"\.(exe|msi|msix|zip|rar)$", text.lower()):
         return True
     return False
