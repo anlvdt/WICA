@@ -730,6 +730,27 @@ def _poll_installer_exit(process_name_lower: str, timeout: int = 300):
         time.sleep(2)
 
 
+# --- Cleanup temp helper ---
+def _cleanup_temp(extract_dir: str):
+    """Dọn dẹp thư mục tạm sau cài đặt.
+
+    EDR-safe: chỉ dùng shutil.rmtree (Python stdlib).
+    Bỏ qua lỗi nếu file đang bị lock bởi installer.
+    """
+    if not extract_dir or not os.path.isdir(extract_dir):
+        return
+    # Chỉ xóa thư mục WICA_ trong temp (an toàn)
+    basename = os.path.basename(extract_dir)
+    if not basename.startswith("WICA_"):
+        return
+    try:
+        import shutil
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        _audit("CLEANUP", f"removed {extract_dir}", "OK")
+    except Exception:
+        pass  # Bỏ qua — file có thể đang bị lock
+
+
 # --- Progress emit helper ---
 def _emit_progress(msg: str):
     """Gửi thông báo progress qua callback (nếu có)."""
@@ -1905,6 +1926,8 @@ class SoftwareManager:
         if silent:
             # Silent install: chạy và đợi xong
             success, msg = self._run_installer_silent(installer)
+            # Dọn dẹp temp sau khi cài xong
+            _cleanup_temp(extract_dir)
             return msg
         else:
             # Legacy: os.startfile (giống user double-click)
@@ -1912,10 +1935,12 @@ class SoftwareManager:
             try:
                 os.startfile(installer)
                 _audit("INSTALL_LOCAL_RESULT", f"opened {fname}", "OK")
+                # Đợi installer exit rồi dọn temp
+                time.sleep(3)
+                _poll_installer_exit(fname.lower(), 300)
+                _cleanup_temp(extract_dir)
                 return (
-                    f"[ok] Đã giải nén và mở installer: {fname}\n"
-                    f"Cửa sổ cài đặt sẽ hiện lên, bạn thao tác bình thường.\n"
-                    f"(Thư mục tạm: {extract_dir})"
+                    f"[ok] Đã cài xong: {fname}"
                 )
             except OSError as e:
                 _audit("INSTALL_LOCAL_RESULT", str(e), "FAIL")
@@ -2063,6 +2088,9 @@ class SoftwareManager:
                 return f"[error] Không tìm thấy installer trong {os.path.basename(archive_path)}"
 
         _emit_progress(install_result)
+
+        # --- Dọn dẹp temp ---
+        _cleanup_temp(extract_dir)
 
         # --- Bước 4: Tìm HTKK.exe đã cài (trong Program Files) ---
         # Đợi thêm 2s cho registry update
