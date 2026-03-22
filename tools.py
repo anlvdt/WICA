@@ -673,6 +673,63 @@ def create_shortcut_admin(target: str, shortcut_name: str, desktop: str = "publi
         return f"[warn] Đã tạo shortcut nhưng không set được Run as Admin: {e}"
 
 
+# --- Poll installer process exit ---
+def _poll_installer_exit(process_name_lower: str, timeout: int = 300):
+    """Đợi process installer thoát bằng cách poll danh sách process.
+
+    EDR-safe: chỉ đọc process list bằng CreateToolhelp32Snapshot (read-only).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+    def _is_running(name_lower: str) -> bool:
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snap == -1:
+            return False
+        pe = PROCESSENTRY32()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        try:
+            if kernel32.Process32First(snap, ctypes.byref(pe)):
+                while True:
+                    try:
+                        exe = pe.szExeFile.decode("utf-8", errors="ignore").lower()
+                    except Exception:
+                        exe = ""
+                    if exe == name_lower:
+                        kernel32.CloseHandle(snap)
+                        return True
+                    if not kernel32.Process32Next(snap, ctypes.byref(pe)):
+                        break
+        finally:
+            kernel32.CloseHandle(snap)
+        return False
+
+    # Poll mỗi 2s cho đến khi process thoát hoặc timeout
+    start = time.time()
+    while time.time() - start < timeout:
+        if not _is_running(process_name_lower):
+            return  # Installer đã thoát
+        time.sleep(2)
+
+
 # --- Progress emit helper ---
 def _emit_progress(msg: str):
     """Gửi thông báo progress qua callback (nếu có)."""
@@ -1525,27 +1582,90 @@ class SoftwareManager:
             _audit("INSTALL_LOCAL_RESULT", str(e), "FAIL")
             return f"[error] Không mở được file: {e}"
 
-    def _extract_and_install(self, archive_path: str, ext: str) -> str:
-        """Giải nén .zip/.rar vào thư mục tạm rồi tìm và chạy installer.
+    @staticmethod
+    def _run_installer_silent(installer_path: str, timeout: int = 300) -> tuple:
+        """Chạy installer silent/unattended và đợi xong. Trả về (success, message).
 
-        EDR-safe:
-        - .zip: dùng zipfile (Python stdlib) — không spawn process
-        - .rar: dùng rarfile lib nếu có, fallback dùng 7z.exe nếu có trên máy
-        - Tìm installer theo thứ tự ưu tiên: .exe > .msi > .msix
-        - Chạy bằng os.startfile() (ShellExecuteW) — giống user double-click
+        Thứ tự thử:
+        1. Nếu .msi → msiexec /i ... /quiet /norestart
+        2. Nếu .exe → thử /S (NSIS) → /VERYSILENT (Inno) → chạy thường + đợi
+
+        EDR-safe: chạy installer binary trực tiếp (không qua cmd/powershell).
+        msiexec.exe = Microsoft-signed system binary.
         """
+        fname = os.path.basename(installer_path)
+        ext = os.path.splitext(installer_path)[1].lower()
+        _audit("SILENT_INSTALL", f"installer={installer_path}")
+
+        # --- MSI: dùng msiexec /quiet (đáng tin nhất) ---
+        if ext == ".msi":
+            _emit_progress(f"Đang cài silent (MSI): {fname} ...")
+            try:
+                proc = subprocess.Popen(
+                    ["msiexec", "/i", installer_path, "/quiet", "/norestart"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                proc.communicate(timeout=timeout)
+                if proc.returncode == 0:
+                    _audit("SILENT_INSTALL", f"MSI success: {fname}", "OK")
+                    return (True, f"[ok] Đã cài silent: {fname}")
+                elif proc.returncode == 1603:
+                    _audit("SILENT_INSTALL", f"MSI fatal error 1603: {fname}", "FAIL")
+                    return (False, f"[error] MSI lỗi 1603 (cần gỡ bản cũ trước): {fname}")
+                else:
+                    _audit("SILENT_INSTALL", f"MSI rc={proc.returncode}: {fname}", "FAIL")
+                    return (False, f"[error] MSI lỗi (rc={proc.returncode}): {fname}")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                return (False, f"[error] Cài MSI quá lâu (>{timeout}s): {fname}")
+            except Exception as e:
+                _audit("SILENT_INSTALL", f"MSI error: {e}", "FAIL")
+                return (False, f"[error] Lỗi cài MSI: {e}")
+
+        # --- EXE: chạy installer bình thường + đợi xong ---
+        # Các installer thuế VN (iTaxViewer, CTSigningHub) là custom exe,
+        # KHÔNG hỗ trợ silent flags (/S, /VERYSILENT, /quiet).
+        # Chúng trả về 0 ngay mà không cài gì → false positive.
+        # Giải pháp: chạy bình thường (UI) + đợi process kết thúc.
+        if ext == ".exe":
+            _emit_progress(f"Đang chạy installer: {fname} ...")
+            _emit_progress(f"[...] Vui lòng click qua wizard cài đặt. WICA sẽ đợi...")
+            try:
+                # Dùng os.startfile (ShellExecuteW) để chạy installer giống user double-click
+                # Sau đó poll process name để đợi installer thoát
+                import ctypes
+                fname_lower = fname.lower()
+
+                # ShellExecuteW trả về HINSTANCE > 32 nếu thành công
+                os.startfile(installer_path)
+                _audit("SILENT_INSTALL", f"exe started (UI): {fname}", "OK")
+
+                # Đợi installer chạy xong bằng cách poll process
+                # Tìm process theo tên file
+                time.sleep(3)  # Chờ installer khởi động
+                _poll_installer_exit(fname_lower, timeout)
+
+                _audit("SILENT_INSTALL", f"exe finished: {fname}", "OK")
+                return (True, f"[ok] Đã cài xong: {fname}")
+            except OSError as e:
+                _audit("SILENT_INSTALL", f"exe error: {e}", "FAIL")
+                return (False, f"[error] Không chạy được installer: {e}")
+
+        return (False, f"[error] Định dạng không hỗ trợ: {ext}")
+
+    def _extract_to_temp(self, archive_path: str, ext: str) -> str:
+        """Giải nén archive vào thư mục tạm. Trả về extract_dir hoặc rỗng nếu lỗi."""
         import tempfile
         import zipfile
 
         archive_name = os.path.splitext(os.path.basename(archive_path))[0]
-        # Giải nén vào thư mục tạm cố định (không random) để dễ debug
         extract_dir = os.path.join(tempfile.gettempdir(), f"WICA_{archive_name}")
         os.makedirs(extract_dir, exist_ok=True)
 
-        _emit_progress(f"Đang giải nén {os.path.basename(archive_path)} → {extract_dir} ...")
+        _emit_progress(f"Đang giải nén {os.path.basename(archive_path)} ...")
         _audit("EXTRACT", f"archive={archive_path} dest={extract_dir}")
 
-        # --- Giải nén ---
         if ext == ".zip":
             try:
                 with zipfile.ZipFile(archive_path, "r") as zf:
@@ -1556,13 +1676,14 @@ class SoftwareManager:
                             _emit_progress(f"  [{i}/{total}] giải nén...")
             except zipfile.BadZipFile as e:
                 _audit("EXTRACT", f"bad zip: {e}", "FAIL")
-                return f"[error] File ZIP bị lỗi: {e}"
+                _emit_progress(f"[error] File ZIP bị lỗi: {e}")
+                return ""
             except Exception as e:
                 _audit("EXTRACT", str(e), "FAIL")
-                return f"[error] Lỗi giải nén ZIP: {e}"
+                _emit_progress(f"[error] Lỗi giải nén ZIP: {e}")
+                return ""
 
         elif ext == ".rar":
-            # Thử rarfile lib trước
             extracted = False
             try:
                 import rarfile
@@ -1570,20 +1691,17 @@ class SoftwareManager:
                     rf.extractall(extract_dir)
                 extracted = True
             except ImportError:
-                pass  # rarfile không có → thử 7z
+                pass
             except Exception as e:
                 _audit("EXTRACT", f"rarfile error: {e}", "FAIL")
-                return f"[error] Lỗi giải nén RAR: {e}"
+                _emit_progress(f"[error] Lỗi giải nén RAR: {e}")
+                return ""
 
             if not extracted:
-                # Fallback: tìm 7z.exe trên máy (thường có nếu đã cài 7-Zip)
                 seven_zip = self._find_7zip()
                 if not seven_zip:
-                    return (
-                        "[error] Không giải nén được file RAR.\n"
-                        "Cần cài thư viện 'rarfile' (pip install rarfile) "
-                        "hoặc cài 7-Zip trên máy."
-                    )
+                    _emit_progress("[error] Không giải nén được file RAR — cần 7-Zip.")
+                    return ""
                 try:
                     proc = subprocess.Popen(
                         [seven_zip, "x", archive_path, f"-o{extract_dir}", "-y"],
@@ -1592,14 +1710,39 @@ class SoftwareManager:
                     )
                     proc.communicate(timeout=120)
                     if proc.returncode != 0:
-                        return f"[error] 7-Zip giải nén thất bại (rc={proc.returncode})"
+                        _emit_progress(f"[error] 7-Zip giải nén thất bại (rc={proc.returncode})")
+                        return ""
                 except Exception as e:
-                    return f"[error] Lỗi chạy 7-Zip: {e}"
+                    _emit_progress(f"[error] Lỗi chạy 7-Zip: {e}")
+                    return ""
 
         _emit_progress(f"[ok] Giải nén xong → {extract_dir}")
+        return extract_dir
 
-        # --- Tìm installer trong thư mục vừa giải nén ---
+    def _extract_and_install(self, archive_path: str, ext: str, silent: bool = False) -> str:
+        """Giải nén .zip/.rar vào thư mục tạm rồi tìm và chạy installer.
+
+        Nếu silent=True: dùng _run_installer_silent() để cài không cần click.
+        Nếu silent=False: dùng os.startfile() giống user double-click (legacy).
+
+        EDR-safe:
+        - .zip: dùng zipfile (Python stdlib)
+        - .rar: dùng rarfile lib hoặc 7z.exe fallback
+        - Installer chạy trực tiếp (không qua cmd/powershell)
+        """
+        extract_dir = self._extract_to_temp(archive_path, ext)
+        if not extract_dir:
+            return f"[error] Không giải nén được: {os.path.basename(archive_path)}"
+
+        # --- Tìm installer ---
         installer = self._find_installer(extract_dir)
+
+        # Nếu silent mode: ưu tiên tìm .msi trước (cài silent đáng tin hơn)
+        if silent and installer:
+            msi_file = self._find_msi(extract_dir)
+            if msi_file:
+                installer = msi_file  # Ưu tiên MSI cho silent install
+
         if not installer:
             _audit("EXTRACT", f"no installer found in {extract_dir}", "FAIL")
             return (
@@ -1609,20 +1752,38 @@ class SoftwareManager:
             )
 
         fname = os.path.basename(installer)
-        _emit_progress(f"Đang mở installer: {fname} ...")
-        _audit("INSTALL_LOCAL", f"extracted installer={installer}")
+        _audit("INSTALL_LOCAL", f"extracted installer={installer} silent={silent}")
 
-        try:
-            os.startfile(installer)
-            _audit("INSTALL_LOCAL_RESULT", f"opened {fname}", "OK")
-            return (
-                f"[ok] Đã giải nén và mở installer: {fname}\n"
-                f"Cửa sổ cài đặt sẽ hiện lên, bạn thao tác bình thường.\n"
-                f"(Thư mục tạm: {extract_dir})"
-            )
-        except OSError as e:
-            _audit("INSTALL_LOCAL_RESULT", str(e), "FAIL")
-            return f"[error] Không mở được installer: {e}"
+        if silent:
+            # Silent install: chạy và đợi xong
+            success, msg = self._run_installer_silent(installer)
+            return msg
+        else:
+            # Legacy: os.startfile (giống user double-click)
+            _emit_progress(f"Đang mở installer: {fname} ...")
+            try:
+                os.startfile(installer)
+                _audit("INSTALL_LOCAL_RESULT", f"opened {fname}", "OK")
+                return (
+                    f"[ok] Đã giải nén và mở installer: {fname}\n"
+                    f"Cửa sổ cài đặt sẽ hiện lên, bạn thao tác bình thường.\n"
+                    f"(Thư mục tạm: {extract_dir})"
+                )
+            except OSError as e:
+                _audit("INSTALL_LOCAL_RESULT", str(e), "FAIL")
+                return f"[error] Không mở được installer: {e}"
+
+    @staticmethod
+    def _find_msi(directory: str) -> str | None:
+        """Tìm file .msi trong thư mục (bao gồm subfolder 1 cấp)."""
+        for root, dirs, files in os.walk(directory):
+            for f in files:
+                if f.lower().endswith(".msi"):
+                    return os.path.join(root, f)
+            # Chỉ tìm 1 cấp subfolder
+            if root != directory:
+                continue
+        return None
 
     @staticmethod
     def _find_installer(directory: str) -> str | None:
@@ -1675,14 +1836,18 @@ class SoftwareManager:
         return None
 
     def install_htkk(self, archive_path: str, dll_version: bool = False) -> str:
-        """Cài HTKK: gỡ phiên bản cũ → giải nén → cài mới → tạo shortcut Run as Admin.
+        """Cài HTKK: gỡ phiên bản cũ → giải nén → cài MSI silent → tạo shortcut Run as Admin.
 
         HTKK yêu cầu:
         1. Gỡ bản cũ trước (không thể cài đè)
         2. Sau cài xong, cần chạy với quyền Admin lần đầu để đăng ký DLL
         3. Shortcut phải luôn "Run as Administrator"
 
-        EDR-safe: registry lookup + os.startfile + COM shortcut + binary patch.
+        Flow mới (silent):
+        - Giải nén .rar → tìm HTKK.msi → msiexec /quiet → đợi xong → tạo shortcut
+        - Không cần click gì cả
+
+        EDR-safe: msiexec = Microsoft-signed + winreg + COM shortcut + binary patch.
         """
         variant = "HTKK_DLL" if dll_version else "HTKK"
         _audit("INSTALL_HTKK", f"archive={archive_path} variant={variant}")
@@ -1698,24 +1863,45 @@ class SoftwareManager:
 
         # --- Bước 2: Giải nén ---
         ext = os.path.splitext(archive_path)[1].lower()
-        extract_result = self._extract_and_install(archive_path, ext)
+        extract_dir = self._extract_to_temp(archive_path, ext)
+        if not extract_dir:
+            return f"[error] Không giải nén được: {os.path.basename(archive_path)}"
 
-        # --- Bước 3: Tìm HTKK.exe đã cài (trong Program Files) ---
+        # --- Bước 3: Tìm MSI và cài silent ---
+        msi_file = self._find_msi(extract_dir)
+        if msi_file:
+            # Ưu tiên MSI silent install (không cần click)
+            _emit_progress(f"Đang cài HTKK silent (MSI)...")
+            success, install_result = self._run_installer_silent(msi_file, timeout=300)
+        else:
+            # Fallback: tìm setup.exe và chạy silent
+            installer = self._find_installer(extract_dir)
+            if installer:
+                _emit_progress(f"Đang cài HTKK...")
+                success, install_result = self._run_installer_silent(installer, timeout=300)
+            else:
+                return f"[error] Không tìm thấy installer trong {os.path.basename(archive_path)}"
+
+        _emit_progress(install_result)
+
+        # --- Bước 4: Tìm HTKK.exe đã cài (trong Program Files) ---
+        # Đợi thêm 2s cho registry update
+        time.sleep(2)
         htkk_exe = self._find_installed_exe("htkk")
         if not htkk_exe:
             return (
-                f"{extract_result}\n"
+                f"{install_result}\n"
                 f"[warn] Không tìm thấy HTKK.exe sau cài đặt.\n"
                 f"Vui lòng tạo shortcut thủ công với 'Run as Administrator'."
             )
 
-        # --- Bước 4: Tạo shortcut Run as Admin ---
+        # --- Bước 5: Tạo shortcut Run as Admin ---
         _emit_progress("Đang tạo shortcut HTKK (Run as Admin)...")
         shortcut_result = create_shortcut_admin(htkk_exe, variant, "public")
         _emit_progress(shortcut_result)
 
         return (
-            f"{extract_result}\n"
+            f"{install_result}\n"
             f"{shortcut_result}\n"
             f"[info] Shortcut đã được set 'Run as Administrator' để đăng ký DLL tự động."
         )
@@ -1724,8 +1910,8 @@ class SoftwareManager:
     def _uninstall_htkk() -> str:
         """Tìm và gỡ HTKK phiên bản cũ qua registry UninstallString.
 
-        EDR-safe: winreg lookup + os.startfile (mở uninstaller giống user double-click).
-        Không dùng silent flags — để user xác nhận gỡ.
+        EDR-safe: winreg lookup + msiexec /x /quiet (silent uninstall).
+        msiexec.exe = Microsoft-signed system binary.
         """
         uninstall_paths = [
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
@@ -1763,25 +1949,69 @@ class SoftwareManager:
                                 _audit("UNINSTALL_HTKK",
                                        f"found: {display_name} v{version}, cmd={uninstall_str}", "OK")
                                 _emit_progress(
-                                    f"Tìm thấy {display_name} v{version} — đang mở trình gỡ cài đặt...")
+                                    f"Đang gỡ {display_name} v{version} (silent)...")
 
-                                # Mở uninstaller bằng os.startfile (giống user double-click)
+                                # --- Silent uninstall ---
+                                # Cách 1: MSI product code (subkey_name là GUID)
+                                import re as _re
+                                is_msi_guid = bool(_re.match(
+                                    r'^\{[0-9A-Fa-f\-]+\}$', subkey_name))
+                                is_msiexec = "msiexec" in uninstall_str.lower()
+
+                                if is_msi_guid or is_msiexec:
+                                    # Gỡ MSI silent: msiexec /x {GUID} /quiet /norestart
+                                    product_code = subkey_name if is_msi_guid else ""
+                                    if not product_code:
+                                        # Trích GUID từ UninstallString
+                                        guid_match = _re.search(
+                                            r'\{[0-9A-Fa-f\-]+\}', uninstall_str)
+                                        product_code = guid_match.group(0) if guid_match else ""
+
+                                    if product_code:
+                                        try:
+                                            proc = subprocess.Popen(
+                                                ["msiexec", "/x", product_code,
+                                                 "/quiet", "/norestart"],
+                                                stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE,
+                                                creationflags=CREATE_NO_WINDOW,
+                                            )
+                                            proc.communicate(timeout=120)
+                                            if proc.returncode == 0:
+                                                _audit("UNINSTALL_HTKK",
+                                                       f"msiexec silent OK", "OK")
+                                                _emit_progress(
+                                                    f"[ok] Đã gỡ {display_name} v{version} (silent)")
+                                                return f"[ok] Đã gỡ {display_name} v{version}"
+                                            else:
+                                                _audit("UNINSTALL_HTKK",
+                                                       f"msiexec rc={proc.returncode}",
+                                                       "WARN")
+                                        except Exception as e:
+                                            _audit("UNINSTALL_HTKK",
+                                                   f"msiexec error: {e}", "WARN")
+
+                                # Cách 2: Fallback — chạy uninstall string + đợi xong
                                 try:
-                                    os.startfile(uninstall_str)
-                                    _audit("UNINSTALL_HTKK", "uninstaller opened", "OK")
-                                    # Đợi user hoàn tất gỡ cài đặt
-                                    _emit_progress(
-                                        "[...] Vui lòng hoàn tất gỡ cài đặt HTKK cũ trong cửa sổ vừa mở...")
-                                    # Chờ tối đa 120s cho uninstaller chạy xong
-                                    for _ in range(120):
-                                        time.sleep(1)
-                                        if not _is_installed_via_registry("htkk"):
-                                            _emit_progress("[ok] Đã gỡ HTKK cũ thành công.")
-                                            return f"[ok] Đã gỡ {display_name} v{version}"
-                                    return f"[warn] Đã mở trình gỡ cài đặt — vui lòng xác nhận gỡ xong trước khi tiếp tục."
-                                except OSError as e:
+                                    import shlex as _shlex
+                                    parts = _shlex.split(uninstall_str)
+                                    proc = subprocess.Popen(
+                                        parts,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE,
+                                        creationflags=CREATE_NO_WINDOW,
+                                    )
+                                    proc.communicate(timeout=120)
+                                    # Kiểm tra đã gỡ xong chưa
+                                    time.sleep(2)
+                                    if not _is_installed_via_registry("htkk"):
+                                        _emit_progress(
+                                            f"[ok] Đã gỡ {display_name} v{version}")
+                                        return f"[ok] Đã gỡ {display_name} v{version}"
+                                    return f"[warn] Đã chạy uninstaller nhưng HTKK vẫn còn."
+                                except Exception as e:
                                     _audit("UNINSTALL_HTKK", str(e), "FAIL")
-                                    return f"[error] Không mở được uninstaller: {e}"
+                                    return f"[error] Không gỡ được HTKK: {e}"
                         except (OSError, FileNotFoundError):
                             pass
                         i += 1
@@ -1795,12 +2025,13 @@ class SoftwareManager:
         return ""
 
     def install_tax_app(self, archive_path: str, shortcut_name: str = "") -> str:
-        """Cài phần mềm thuế (không phải HTKK): giải nén → cài → tạo shortcut Run as Admin.
+        """Cài phần mềm thuế (không phải HTKK): giải nén → cài silent → tạo shortcut Run as Admin.
 
         Dùng cho: iTaxViewer, CT SigningHub, eSigner...
         Shortcut tạo trên Public Desktop (all users) với flag Run as Administrator.
 
-        EDR-safe: os.startfile + COM shortcut + binary patch.
+        Flow mới: giải nén → chạy installer silent (thử /S, /VERYSILENT) → đợi xong → tạo shortcut.
+        EDR-safe: subprocess trực tiếp + COM shortcut + binary patch.
         """
         _audit("INSTALL_TAX", f"archive={archive_path} shortcut={shortcut_name}")
 
@@ -1809,11 +2040,14 @@ class SoftwareManager:
 
         ext = os.path.splitext(archive_path)[1].lower()
 
-        # Giải nén + chạy installer
-        install_result = self.install_local(archive_path)
+        # Giải nén + cài silent (đợi xong)
+        install_result = self._extract_and_install(archive_path, ext, silent=True)
 
         if not shortcut_name:
             return install_result
+
+        # Đợi 2s cho registry update
+        time.sleep(2)
 
         # Tìm exe đã cài qua registry
         exe_path = self._find_installed_exe(shortcut_name)
