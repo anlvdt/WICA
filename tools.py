@@ -1506,7 +1506,34 @@ class SoftwareManager:
         with _cb_lock:
             cb = _progress_callback
         if cb:
-            cb(f"Đang kết nối winget để cài {package}...")
+            cb(f"Đang kiểm tra {package}...")
+
+        # --- Pre-check: kiểm tra version trước khi gọi winget (tiết kiệm 5-10s) ---
+        # Tìm keyword từ winget ID: "Google.Chrome" → "chrome"
+        pkg_parts = pkg_id.replace(".", " ").split()
+        app_keyword = pkg_parts[-1] if pkg_parts else package
+        installed_ver = _get_installed_version(app_keyword)
+        if installed_ver:
+            # Đã cài — kiểm tra xem winget có version mới hơn không
+            # Thử dùng winget upgrade để upgrade thay vì install
+            _audit("INSTALL", f"{package} already installed v{installed_ver}, trying upgrade")
+            if cb:
+                cb(f"{package} v{installed_ver} đã cài. Đang kiểm tra bản mới...")
+            upgrade_args = [
+                "upgrade", "--id", pkg_id,
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "-e",
+            ]
+            code, output = _run_winget_progress(upgrade_args)
+            if code == 0:
+                return f"[ok] Đã nâng cấp {package}: v{installed_ver} → bản mới nhất"
+            out_lower = output.lower()
+            if "no applicable update" in out_lower or "no installed package" in out_lower:
+                return f"[ok] {package} v{installed_ver} đã là bản mới nhất. Không cần cài lại."
+            # Winget upgrade fail → thử install bình thường (có thể khác source)
+            if cb:
+                cb(f"Upgrade fail, thử cài lại {package}...")
 
         # Ưu tiên local installer cho Office/bootstrapper (tránh console đen)
         if pkg_id in self._PREFER_LOCAL:
@@ -1659,7 +1686,29 @@ class SoftwareManager:
         if not os.path.isfile(file_path):
             return f"[error] Không tìm thấy file: {file_path}"
 
+        fname = os.path.basename(file_path)
         ext = os.path.splitext(file_path)[1].lower()
+
+        # --- Kiểm tra version trước khi cài ---
+        new_ver = _extract_version_from_filename(fname)
+        if new_ver:
+            # Tạo keyword tìm kiếm từ tên file (bỏ version, extension)
+            import re
+            app_keyword = re.sub(r'[_\s]?v?\d+[\d.]*', '', os.path.splitext(fname)[0])
+            app_keyword = re.sub(r'[_\-]?(signed|setup|install|portable|x64|x86)', '',
+                                 app_keyword, flags=re.IGNORECASE).strip('_- ')
+            if app_keyword:
+                installed_ver = _get_installed_version(app_keyword)
+                if installed_ver:
+                    cmp = _compare_versions(installed_ver, new_ver)
+                    if cmp == 0:
+                        _audit("INSTALL_LOCAL", f"{app_keyword} same version {installed_ver}, skip", "SKIP")
+                        return f"[ok] {app_keyword} v{installed_ver} đã được cài sẵn (cùng version). Không cần cài lại."
+                    elif cmp > 0:
+                        _audit("INSTALL_LOCAL", f"{app_keyword} installed {installed_ver} > new {new_ver}, skip", "SKIP")
+                        return f"[ok] {app_keyword} v{installed_ver} đã có (mới hơn v{new_ver}). Không cần cài lại."
+                    else:
+                        _emit_progress(f"Đang nâng cấp {app_keyword}: v{installed_ver} → v{new_ver}")
 
         # --- Xử lý file nén: giải nén trước rồi tìm installer ---
         if ext in (".zip", ".rar"):
@@ -1669,7 +1718,6 @@ class SoftwareManager:
         if ext not in allowed:
             return f"[error] Định dạng không hỗ trợ: {ext}. Chỉ hỗ trợ: {', '.join(allowed | {'.zip', '.rar'})}"
 
-        fname = os.path.basename(file_path)
 
         try:
             # os.startfile = ShellExecuteW = giống user double-click trong Explorer
