@@ -1204,14 +1204,6 @@ class AntiGravityAgent:
                 if self._cancelled:
                     on_output(f"[warn] Đã dừng sau {run_num} bước chạy", "warn")
                     break
-                # --- Skip check inline — output ngay ---
-                skip_reason = self._check_skip(action)
-                if skip_reason:
-                    short = self._describe_action_short(action)
-                    on_output(f"  [skip] {short} -- {skip_reason}", "info")
-                    _audit("PROFILE_SKIP", f"{action.get('type','')} reason={skip_reason}", "OK")
-                    skip_count += 1
-                    continue
                 run_num += 1
                 desc = self._describe_action(action)
                 on_output(f"  [{run_num}] {desc}", "progress")
@@ -1221,7 +1213,11 @@ class AntiGravityAgent:
                     continue
                 result = self._execute_action(action)
                 if result:
-                    if "[ok]" in result or "[info]" in result:
+                    if "[skip]" in result:
+                        on_output(f"  {result}", "info")
+                        skip_count += 1
+                        run_num -= 1  # Không đếm skip vào run_num
+                    elif "[ok]" in result or "[info]" in result:
                         on_output(f"  {result}", "ok")
                         ok_count += 1
                     elif "[error]" in result:

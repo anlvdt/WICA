@@ -92,10 +92,11 @@ def build():
         print(f"  [clean] Xóa {spec_file}")
         os.remove(spec_file)
 
-    # PyInstaller FOLDER mode (EDR-safe, KHONG --onefile)
+    # PyInstaller FOLDER mode (EDR-safe, KHONG --onefile, KHONG UPX)
     subprocess.run([
         "pyinstaller",
         "--noconfirm",
+        "--noupx",           # EDR-safe: UPX-packed binaries bi CrowdStrike flag
         "--name", APP_NAME,
         "--icon", "app_icon.ico",
         "--add-data", "config.yaml;.",

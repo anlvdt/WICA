@@ -1773,9 +1773,8 @@ class SoftwareManager:
                                     _emit_progress(
                                         "[...] Vui lòng hoàn tất gỡ cài đặt HTKK cũ trong cửa sổ vừa mở...")
                                     # Chờ tối đa 120s cho uninstaller chạy xong
-                                    import time as _time
                                     for _ in range(120):
-                                        _time.sleep(1)
+                                        time.sleep(1)
                                         if not _is_installed_via_registry("htkk"):
                                             _emit_progress("[ok] Đã gỡ HTKK cũ thành công.")
                                             return f"[ok] Đã gỡ {display_name} v{version}"
@@ -1794,60 +1793,6 @@ class SoftwareManager:
 
         _audit("UNINSTALL_HTKK", "no previous HTKK found", "SKIP")
         return ""
-
-    @staticmethod
-    def _find_htkk_exe() -> str | None:
-        """Tìm HTKK.exe sau khi cài đặt.
-
-        Tìm trong registry (InstallLocation) và các path mặc định.
-        """
-        # 1. Tìm qua registry
-        uninstall_paths = [
-            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
-        ]
-        for hive, reg_path in uninstall_paths:
-            try:
-                key = winreg.OpenKey(hive, reg_path, 0, winreg.KEY_READ)
-                i = 0
-                while True:
-                    try:
-                        subkey_name = winreg.EnumKey(key, i)
-                        try:
-                            sk = winreg.OpenKey(key, subkey_name, 0, winreg.KEY_READ)
-                            display_name, _ = winreg.QueryValueEx(sk, "DisplayName")
-                            if "htkk" in display_name.lower():
-                                try:
-                                    loc, _ = winreg.QueryValueEx(sk, "InstallLocation")
-                                    loc = loc.strip().strip('"')
-                                    if os.path.isdir(loc):
-                                        for f in os.listdir(loc):
-                                            if f.lower() == "htkk.exe":
-                                                winreg.CloseKey(sk)
-                                                winreg.CloseKey(key)
-                                                return os.path.join(loc, f)
-                                except (OSError, FileNotFoundError):
-                                    pass
-                            winreg.CloseKey(sk)
-                        except (OSError, FileNotFoundError):
-                            pass
-                        i += 1
-                    except OSError:
-                        break
-                winreg.CloseKey(key)
-            except (OSError, FileNotFoundError):
-                pass
-
-        # 2. Fallback: path mặc định
-        defaults = [
-            r"C:\Program Files\HTKK\HTKK.exe",
-            r"C:\Program Files (x86)\HTKK\HTKK.exe",
-            r"C:\HTKK\HTKK.exe",
-        ]
-        for p in defaults:
-            if os.path.isfile(p):
-                return p
-        return None
 
     def install_tax_app(self, archive_path: str, shortcut_name: str = "") -> str:
         """Cài phần mềm thuế (không phải HTKK): giải nén → cài → tạo shortcut Run as Admin.
@@ -1937,7 +1882,7 @@ class SoftwareManager:
                 pass
         return None
 
-
+    def upgrade_all(self) -> str:
         """Cập nhật tất cả phần mềm đã cài qua winget upgrade --all."""
         _audit("UPGRADE_ALL", "starting")
         args = [

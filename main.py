@@ -197,23 +197,70 @@ def _ensure_unikey_elevated():
         if not unikey_path:
             return
 
-        # --- Kill UniKey processes via TerminateProcess ---
-        # Verify path của process trước khi kill để tránh kill nhầm process giả mạo tên
+        # --- Graceful shutdown UniKey via WM_CLOSE (EDR-safe) ---
+        # Dùng WM_CLOSE thay vì TerminateProcess để tránh EDR alert.
+        # TerminateProcess chỉ dùng làm fallback nếu WM_CLOSE không hiệu quả.
+        # Verify path của process trước khi close để tránh đóng nhầm process giả mạo tên
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        WM_CLOSE = 0x0010
+        user32 = ctypes.windll.user32
+
+        verified_pids = set()
         for pid in unikey_pids:
-            verified = False
             h_query = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             if h_query:
                 buf = ctypes.create_unicode_buffer(MAX_PATH)
                 buf_size = ctypes.wintypes.DWORD(MAX_PATH)
                 try:
                     if kernel32.QueryFullProcessImageNameW(h_query, 0, buf, ctypes.byref(buf_size)):
-                        verified = buf.value.lower() == unikey_path.lower()
+                        if buf.value.lower() == unikey_path.lower():
+                            verified_pids.add(pid)
                 except Exception:
                     pass
                 kernel32.CloseHandle(h_query)
-            if not verified:
-                continue  # Bỏ qua nếu path không khớp
+
+        if not verified_pids:
+            return
+
+        # Bước 1: Gửi WM_CLOSE cho tất cả window thuộc UniKey PIDs
+        # EnumWindows callback tìm window → GetWindowThreadProcessId → PostMessage WM_CLOSE
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+        target_pids = verified_pids.copy()
+
+        def _close_cb(hwnd, _lparam):
+            try:
+                pid = ctypes.wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value in target_pids:
+                    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+            return True  # Tiếp tục enum
+
+        user32.EnumWindows(WNDENUMPROC(_close_cb), 0)
+
+        # Bước 2: Đợi tối đa 2s cho graceful shutdown
+        for _ in range(4):
+            time.sleep(0.5)
+            # Kiểm tra xem UniKey còn chạy không
+            still_running = False
+            for pid in list(verified_pids):
+                h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if h:
+                    exit_code = ctypes.wintypes.DWORD()
+                    kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code))
+                    kernel32.CloseHandle(h)
+                    if exit_code.value == 259:  # STILL_ACTIVE
+                        still_running = True
+                    else:
+                        verified_pids.discard(pid)
+                else:
+                    verified_pids.discard(pid)
+            if not still_running:
+                break
+
+        # Bước 3: Fallback — TerminateProcess cho process còn sót (hiếm khi cần)
+        for pid in verified_pids:
             handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
             if handle:
                 kernel32.TerminateProcess(handle, 0)
@@ -314,21 +361,23 @@ class DarkScroll(tk.Frame):
 
 
 class SettingsDialog:
-    """Settings dialog — polished dark theme."""
+    """Settings dialog — polished dark theme with improved UX."""
+
+    _W, _H = 540, 680  # Dialog size
 
     def __init__(self, parent, app):
         self.app = app
         self.win = tk.Toplevel(parent)
         self.win.title("Cài đặt — WICA")
         self.win.configure(bg=C["bg"])
-        self.win.geometry("500x540")
+        self.win.geometry(f"{self._W}x{self._H}")
         self.win.resizable(False, False)
         self.win.transient(parent)
         self.win.grab_set()
         # Center on parent
         self.win.update_idletasks()
-        px = parent.winfo_x() + (parent.winfo_width() - 500) // 2
-        py = parent.winfo_y() + (parent.winfo_height() - 540) // 2
+        px = parent.winfo_x() + (parent.winfo_width() - self._W) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - self._H) // 2
         self.win.geometry(f"+{max(0,px)}+{max(0,py)}")
         _dark_titlebar(self.win)
 
@@ -343,7 +392,7 @@ class SettingsDialog:
 
         # === Bottom buttons (pack first so they stay visible) ===
         tk.Frame(self.win, bg=C["border"], height=1).pack(fill=tk.X, side=tk.BOTTOM)
-        bottom = tk.Frame(self.win, bg=C["bg_alt"], pady=10, padx=20)
+        bottom = tk.Frame(self.win, bg=C["bg_alt"], pady=10, padx=24)
         bottom.pack(fill=tk.X, side=tk.BOTTOM)
         self._status_label = tk.Label(bottom, text="", font=FS, fg=C["ok"], bg=C["bg_alt"])
         self._status_label.pack(side=tk.LEFT)
@@ -351,40 +400,54 @@ class SettingsDialog:
         self._action_btn(bottom, "Đóng", self.win.destroy).pack(side=tk.RIGHT)
 
         # === Header ===
-        hdr = tk.Frame(self.win, bg=C["bg"], padx=24, pady=(14))
+        hdr = tk.Frame(self.win, bg=C["bg"], padx=28, pady=14)
         hdr.pack(fill=tk.X)
         tk.Label(hdr, text="Cài đặt", font=("Segoe UI Semibold", 18),
                  fg=C["accent"], bg=C["bg"]).pack(side=tk.LEFT)
         tk.Label(hdr, text="WICA", font=("Segoe UI", 10),
                  fg=C["text_dim"], bg=C["bg"]).pack(side=tk.LEFT, padx=(8, 0), pady=(6, 0))
 
-        # Container with scroll space
-        container = tk.Frame(self.win, bg=C["bg"], padx=24)
+        # Container
+        container = tk.Frame(self.win, bg=C["bg"], padx=28)
         container.pack(fill=tk.BOTH, expand=True)
 
         # === LLM Section ===
-        self._section(container, "LLM Provider")
+        self._section(container, "LLM Provider", "Cấu hình kết nối AI — cần API key để sử dụng")
         providers = self.config.get("llm_providers", [])
         p0 = providers[0] if providers else {}
 
         self.var_provider = tk.StringVar(value=p0.get("name", "groq"))
-        self._field(container, "Provider", self.var_provider)
+        self._field(container, "Provider", self.var_provider, placeholder="groq")
 
         self.var_apikey = tk.StringVar(value=p0.get("api_key", ""))
-        self._field(container, "API Key", self.var_apikey, show="•")
+        self._field(container, "API Key", self.var_apikey, show="•", placeholder="gsk-xxx... hoặc env:GROQ_API_KEY")
 
         self.var_baseurl = tk.StringVar(value=p0.get("base_url", ""))
-        self._field(container, "Base URL", self.var_baseurl)
+        self._field(container, "Base URL", self.var_baseurl, placeholder="https://api.groq.com/openai/v1")
 
         self.var_model = tk.StringVar(value=p0.get("model", ""))
-        self._field(container, "Model", self.var_model)
+        self._field(container, "Model", self.var_model, placeholder="llama-3.3-70b-versatile")
+
+        # LLM status + reconnect button
+        llm_row = tk.Frame(container, bg=C["bg"])
+        llm_row.pack(fill=tk.X, pady=(6, 0))
+        if app.agent.client:
+            status_text = f"● Đã kết nối: {app.agent.provider_name} ({app.agent.model})"
+            status_color = C["ok"]
+        else:
+            status_text = "○ Chưa kết nối"
+            status_color = C["fail"]
+        self._llm_status = tk.Label(llm_row, text=status_text, font=FS,
+                                    fg=status_color, bg=C["bg"], anchor="w")
+        self._llm_status.pack(side=tk.LEFT)
+        self._action_btn(llm_row, "Kết nối lại", self._reconnect_llm).pack(side=tk.RIGHT)
 
         # === Giao diện ===
-        self._section(container, "Giao diện")
+        self._section(container, "Giao diện", "Tùy chỉnh hiển thị")
 
         # Font size — custom +/- control
         row_font = tk.Frame(container, bg=C["bg"])
-        row_font.pack(fill=tk.X, pady=4)
+        row_font.pack(fill=tk.X, pady=5)
         tk.Label(row_font, text="Cỡ chữ", font=FS, fg=C["text_dim"],
                  bg=C["bg"], width=10, anchor="w").pack(side=tk.LEFT)
 
@@ -397,12 +460,12 @@ class SettingsDialog:
                                      bg=C["bg_input"], anchor="center", pady=2)
         self._font_label.pack(side=tk.LEFT, padx=2)
         self._stepper_btn(fc, "+", lambda: self._adj_font(1)).pack(side=tk.LEFT)
-        tk.Label(row_font, text="pt", font=FS, fg=C["text_dim"],
+        tk.Label(row_font, text="pt   (Ctrl +/−)", font=FS, fg=C["text_dim"],
                  bg=C["bg"]).pack(side=tk.LEFT, padx=(4, 0))
 
         # Sound — custom toggle
         row_sound = tk.Frame(container, bg=C["bg"])
-        row_sound.pack(fill=tk.X, pady=4)
+        row_sound.pack(fill=tk.X, pady=5)
         tk.Label(row_sound, text="Âm thanh", font=FS, fg=C["text_dim"],
                  bg=C["bg"], width=10, anchor="w").pack(side=tk.LEFT)
         self.var_sound = tk.BooleanVar(value=getattr(app, '_notify_sound', True))
@@ -415,23 +478,27 @@ class SettingsDialog:
                  fg=C["text_dim"], bg=C["bg"]).pack(side=tk.LEFT, padx=(8, 0))
 
         # === Nâng cao ===
-        self._section(container, "Nâng cao")
+        self._section(container, "Nâng cao", "Chỉnh sửa file cấu hình gốc")
 
         btn_row = tk.Frame(container, bg=C["bg"])
         btn_row.pack(fill=tk.X, pady=6)
         self._action_btn(btn_row, "Mở config.yaml", self._open_config).pack(side=tk.LEFT, padx=(0, 8))
-        self._action_btn(btn_row, "Kết nối lại LLM", self._reconnect_llm).pack(side=tk.LEFT)
 
     # --- UI helpers ---
 
-    def _section(self, parent, title):
+    def _section(self, parent, title, subtitle=None):
         f = tk.Frame(parent, bg=C["bg"])
-        f.pack(fill=tk.X, pady=(14, 0))
+        f.pack(fill=tk.X, pady=(16, 0))
         tk.Frame(f, bg="#45475a", height=1).pack(fill=tk.X)
-        tk.Label(f, text=title, font=("Segoe UI Semibold", 11),
-                 fg=C["accent_dim"], bg=C["bg"], anchor="w").pack(fill=tk.X, pady=(6, 2))
+        row = tk.Frame(f, bg=C["bg"])
+        row.pack(fill=tk.X, pady=(8, 4))
+        tk.Label(row, text=title, font=("Segoe UI Semibold", 11),
+                 fg=C["accent_dim"], bg=C["bg"], anchor="w").pack(side=tk.LEFT)
+        if subtitle:
+            tk.Label(row, text=f"  —  {subtitle}", font=("Segoe UI", 9),
+                     fg="#6c7086", bg=C["bg"], anchor="w").pack(side=tk.LEFT)
 
-    def _field(self, parent, label, var, show=None):
+    def _field(self, parent, label, var, show=None, placeholder=None):
         row = tk.Frame(parent, bg=C["bg"])
         row.pack(fill=tk.X, pady=3)
         tk.Label(row, text=label, font=FS, fg=C["text_dim"],
@@ -447,6 +514,23 @@ class SettingsDialog:
         entry.pack(fill=tk.X, padx=4, pady=3)
         entry.bind("<FocusIn>", lambda e: wrapper.configure(bg=C["accent"]))
         entry.bind("<FocusOut>", lambda e: wrapper.configure(bg=C["border"]))
+        # Placeholder text
+        if placeholder and not var.get():
+            entry.configure(fg="#585b70")
+            entry.insert(0, placeholder)
+            def _on_focus_in(e, ent=entry, ph=placeholder, v=var):
+                if ent.get() == ph and not v.get():
+                    ent.delete(0, tk.END)
+                    ent.configure(fg=C["text"])
+                wrapper.configure(bg=C["accent"])
+            def _on_focus_out(e, ent=entry, ph=placeholder, v=var):
+                if not ent.get().strip():
+                    v.set("")
+                    ent.insert(0, ph)
+                    ent.configure(fg="#585b70")
+                wrapper.configure(bg=C["border"])
+            entry.bind("<FocusIn>", _on_focus_in)
+            entry.bind("<FocusOut>", _on_focus_out)
         return entry
 
     def _stepper_btn(self, parent, text, cmd):
@@ -466,7 +550,7 @@ class SettingsDialog:
     def _draw_toggle(self):
         self._toggle.delete("all")
         on = self.var_sound.get()
-        # Track
+        # Track with rounded ends
         track_color = C["accent"] if on else C["bg_input"]
         self._toggle.create_rectangle(2, 2, 42, 20, fill=track_color,
                                        outline=track_color, width=0)
@@ -499,13 +583,17 @@ class SettingsDialog:
             self._status_label.configure(text=f"Lỗi: {e}", fg=C["fail"])
 
     def _reconnect_llm(self):
-        self._status_label.configure(text="Đang kết nối...", fg=C["progress"])
+        self._llm_status.configure(text="◌ Đang kết nối...", fg=C["progress"])
         self.win.update()
         self.app.agent._connect_llm()
         if self.app.agent.client:
+            self._llm_status.configure(
+                text=f"● Đã kết nối: {self.app.agent.provider_name} ({self.app.agent.model})",
+                fg=C["ok"])
             self._status_label.configure(
                 text=f"Đã kết nối: {self.app.agent.provider_name}", fg=C["ok"])
         else:
+            self._llm_status.configure(text="○ Không kết nối được", fg=C["fail"])
             self._status_label.configure(text="Không kết nối được LLM", fg=C["fail"])
 
     def _save(self):
@@ -530,7 +618,7 @@ class SettingsDialog:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 yaml.dump(self.config, f, allow_unicode=True, default_flow_style=False,
                           sort_keys=False)
-            self._status_label.configure(text="Đã lưu config.yaml", fg=C["ok"])
+            self._status_label.configure(text="Đã lưu config.yaml ✓", fg=C["ok"])
         except Exception as e:
             self._status_label.configure(text=f"Lỗi lưu: {e}", fg=C["fail"])
             return
@@ -796,7 +884,7 @@ class ChatApp:
         def _softvn_ui_cb(msg: str):
             self._out_queue.put(("softvn", msg))
         self.agent._softvn_copy_cb = _softvn_ui_cb
-        self.root.after(100, self._poll_softvn_queue)
+        self._softvn_header_shown = False
         self.root.deiconify()  # Show after everything is ready
         self.root.state("zoomed")  # Maximize by default
         self.root.bind("<Control-l>", lambda e: self._clear())
@@ -911,7 +999,10 @@ class ChatApp:
         """Drain output queue — 1 item/cycle (50ms) để output hiện từ từ."""
         try:
             t, tag = self._out_queue.get_nowait()
-            if tag == "_ui_cmd":
+            if t == "softvn":
+                # SoftVN sync progress — tag chứa message thật
+                self._handle_softvn_msg(tag)
+            elif tag == "_ui_cmd":
                 if t == "clear":
                     self._clear()
                 elif t == "help":
@@ -1183,24 +1274,27 @@ class ChatApp:
         self._send()
         return "break"
 
-    def _poll_softvn_queue(self):
-        """Poll queue để hiện SoftVN sync progress lên chat (thread-safe)."""
-        try:
-            while True:
-                tag, msg = self._out_queue.get_nowait()
-                if tag == "softvn":
-                    if msg.startswith("[ok]"):
-                        self._w(f"  {msg}\n", "ok")
-                    elif msg.startswith("[x]") or msg.startswith("[~]"):
-                        self._w(f"  {msg}\n", "warn")
-                    else:
-                        self._w(f"  {msg}\n", "info")
-        except Exception:
-            pass
-        # Tiếp tục poll cho đến khi status không còn "pending"
-        status = getattr(self.agent, '_softvn_copy_status', 'pending')
-        if status == "pending":
-            self.root.after(200, self._poll_softvn_queue)
+    def _handle_softvn_msg(self, msg: str):
+        """Xử lý SoftVN sync progress message — hiện rõ ràng trên chat."""
+        if not msg:
+            return
+        # Header: hiện 1 lần duy nhất khi bắt đầu sync
+        if not self._softvn_header_shown and not msg.startswith("[ok]") \
+                and not msg.startswith("[x]") and not msg.startswith("[~]"):
+            self._softvn_header_shown = True
+            self._w("  SoftVN Sync\n", "title")
+        # Phân loại message
+        import re as _re
+        progress_match = _re.match(r"^\s*\[(\d+)/(\d+)\]\s+(.+)$", msg)
+        if progress_match:
+            idx, total, fname = progress_match.groups()
+            self._w(f"    [{idx}/{total}] {fname}\n", "progress")
+        elif msg.startswith("[ok]"):
+            self._w(f"  {msg}\n", "ok")
+        elif msg.startswith("[x]") or msg.startswith("[~]"):
+            self._w(f"  {msg}\n", "warn")
+        else:
+            self._w(f"    {msg}\n", "info")
 
     def _welcome(self):
         ctx = get_run_context()
@@ -1230,48 +1324,55 @@ class ChatApp:
 
         self._w("─" * 48 + "\n", "divider")
 
-        # === Lệnh nhanh ===
-        self._w("  Lệnh nhanh\n", "title")
-        quick = [
-            ("cài máy mới",       "chạy profile chuẩn (winget + config + font...)"),
-            ("cài chrome, 7zip",  "cài nhiều app cùng lúc qua winget"),
-            ("gỡ teamviewer",     "gỡ cài đặt phần mềm"),
-            ("cập nhật tất cả",   "upgrade toàn bộ phần mềm đã cài"),
-            ("bật dark mode",     "cấu hình hệ thống qua registry"),
-            ("đổi tên máy ABC",   "đặt hostname mới"),
-        ]
-        for cmd, desc in quick:
-            self._w(f"  {cmd:<22}", "cmd_inline")
-            self._w(f"  {desc}\n", "label")
+        # === Profile ===
+        self._w("  Profile\n", "title")
+        self._w("    cài máy mới", "cmd_inline")
+        self._w("  chạy toàn bộ: bloatware, config, winget, fonts, deploy, agent\n", "label")
+        self._w("    cài phần mềm thuế", "cmd_inline")
+        self._w("  HTKK + iTaxViewer + CT SigningHub (bản thường)\n", "label")
+        self._w("    cài phần mềm thuế dll", "cmd_inline")
+        self._w("  bản DLL — dữ liệu lớn\n", "label")
 
-        self._w("\n", "info")
+        # === Cài / Gỡ ===
+        self._w("\n  Cài / Gỡ phần mềm\n", "title")
+        install_cmds = ["cài chrome, 7zip, acrobat", "gỡ teamviewer",
+                         "cập nhật tất cả", "gỡ bloatware"]
+        self._w("  " + "  ·  ".join(install_cmds) + "\n", "cmd_inline")
+
+        # === PM Thuế ===
+        self._w("\n  Phần mềm Thuế", "title")
+        self._w("  cài riêng từng app từ SoftVN\\PMThue\n", "label")
+        tax_cmds = ["cài htkk", "cài itaxviewer", "cài signinghub",
+                     "htkk dll", "itaxviewer dll"]
+        self._w("  " + "  ·  ".join(tax_cmds) + "\n", "cmd_inline")
+
+        # === Deploy & Tools ===
+        self._w("\n  Deploy & Tools", "title")
+        self._w("  copy portable app, font, VPN profile\n", "label")
+        deploy_cmds = ["unikey", "teamviewer qs", "cài font vni",
+                         "copy profile vpn"]
+        self._w("  " + "  ·  ".join(deploy_cmds) + "\n", "cmd_inline")
+
+        # === Cấu hình hệ thống ===
+        self._w("\n  Cấu hình hệ thống\n", "title")
+        sys_cmds = ["bật dark mode", "đổi tên máy ABC", "hiện đuôi file",
+                     "taskbar trái", "tắt copilot", "menu cổ điển",
+                     "tắt uac"]
+        self._w("  " + "  ·  ".join(sys_cmds) + "\n", "cmd_inline")
 
         # === LLM hỗ trợ ===
-        self._w("  LLM hỗ trợ\n", "title")
-        llm_hints = [
-            ("mạng chậm / mất mạng",   "chẩn đoán + gợi ý fix"),
-            ("máy lag, chậm",           "kiểm tra CPU/RAM/process"),
-            ("lỗi Windows Update",      "kiểm tra + restart service"),
-            ("cài máy in, VPN...",      "hướng dẫn từng bước"),
-        ]
-        for hint, desc in llm_hints:
-            self._w(f"  {hint:<26}", "cmd_inline")
-            self._w(f"  {desc}\n", "label")
-
-        self._w("\n", "info")
+        self._w("\n  LLM hỗ trợ", "title")
+        self._w("  mô tả vấn đề bằng tiếng Việt, AI tự chẩn đoán và xử lý\n", "label")
+        llm_cmds = ["mạng chậm / mất mạng", "máy lag, chậm",
+                     "lỗi Windows Update", "cài máy in, VPN..."]
+        self._w("  " + "  ·  ".join(llm_cmds) + "\n", "cmd_inline")
 
         # === CLI trực tiếp ===
-        self._w("  CLI trực tiếp\n", "title")
-        cli_cmds = [
-            ("ipconfig /all",     "xem IP, DNS, gateway"),
-            ("ping 8.8.8.8",      "kiểm tra kết nối mạng"),
-            ("tasklist",          "danh sách process đang chạy"),
-            ("netstat -an",       "xem kết nối mạng"),
-            ("systeminfo",        "thông tin hệ thống chi tiết"),
-        ]
-        for cmd, desc in cli_cmds:
-            self._w(f"  {cmd:<22}", "cmd_inline")
-            self._w(f"  {desc}\n", "label")
+        self._w("\n  CLI", "title")
+        self._w("  gõ trực tiếp lệnh Windows, kết quả hiện ngay trong chat\n", "label")
+        cli_cmds = ["ipconfig /all", "ping 8.8.8.8", "tasklist",
+                     "netstat -an", "systeminfo"]
+        self._w("  " + "  ·  ".join(cli_cmds) + "\n", "cmd_inline")
 
         self._w("\n", "info")
         self._w("  Kéo file .exe/.msi vào chat để cài  ·  ↑↓ lệnh cũ  ·  Ctrl+L xoá\n", "hint")
@@ -1434,13 +1535,13 @@ class ChatApp:
 
     def _pick(self):
         ps = filedialog.askopenfilenames(title="Chọn file cài đặt",
-            filetypes=[("File cài đặt","*.exe *.msi *.msix *.msixbundle *.appx"),("Tất cả","*.*")])
+            filetypes=[("File cài đặt","*.exe *.msi *.msix *.msixbundle *.appx *.zip *.rar"),("Tất cả","*.*")])
         for p in ps: self._dropf(p)
 
     def _dropf(self, p):
         p = p.strip().strip('"').strip("'")
         fn = os.path.basename(p); ext = os.path.splitext(p)[1].lower()
-        ok = {".exe",".msi",".msix",".msixbundle",".appx",".appxbundle"}
+        ok = {".exe",".msi",".msix",".msixbundle",".appx",".appxbundle",".zip",".rar"}
         if ext not in ok: self._out(f"[lỗi] Định dạng không hỗ trợ: {fn}", "fail"); return
         self._w("  [file] ", "info"); self._w(fn+"\n", "file")
         self._busy(True)
