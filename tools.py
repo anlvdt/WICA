@@ -1006,6 +1006,106 @@ def _is_winget_installed(pkg_id: str) -> bool:
     return False
 
 
+def _extract_version_from_filename(filename: str) -> str:
+    """Trích version từ tên file installer/archive.
+
+    Xử lý các pattern:
+    - HTKK_v5.6.2_signed.rar → 5.6.2
+    - iTaxViewer2.7.1.exe → 2.7.1
+    - CTSigningHub_signed_1.2.rar → 1.2
+    - HTKK_v5.6.2.rar → 5.6.2
+    """
+    import re
+    # Bỏ extension
+    name = os.path.splitext(filename)[0]
+    # Tìm pattern version: v?X.Y.Z hoặc _X.Y.Z hoặc X.Y.Z
+    # Ưu tiên pattern có 3 số (X.Y.Z), sau đó 2 số (X.Y)
+    match = re.search(r'[_\s]?v?(\d+\.\d+\.\d+)', name, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    match = re.search(r'[_\s]?v?(\d+\.\d+)', name, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _get_installed_version(app_keyword: str) -> str:
+    """Lấy DisplayVersion của app từ registry Uninstall keys.
+
+    Args:
+        app_keyword: Keyword tìm trong DisplayName (case-insensitive)
+    Returns:
+        Version string (e.g. "5.6.2") hoặc "" nếu không tìm thấy.
+    """
+    search = app_keyword.lower()
+    uninstall_paths = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+    for hive, path in uninstall_paths:
+        try:
+            key = winreg.OpenKey(hive, path, 0, winreg.KEY_READ)
+            i = 0
+            while True:
+                try:
+                    subkey_name = winreg.EnumKey(key, i)
+                    try:
+                        sk = winreg.OpenKey(key, subkey_name, 0, winreg.KEY_READ)
+                        display_name, _ = winreg.QueryValueEx(sk, "DisplayName")
+                        if search in display_name.lower():
+                            try:
+                                version, _ = winreg.QueryValueEx(sk, "DisplayVersion")
+                                winreg.CloseKey(sk)
+                                winreg.CloseKey(key)
+                                return str(version).strip()
+                            except (OSError, FileNotFoundError):
+                                pass
+                        winreg.CloseKey(sk)
+                    except (OSError, FileNotFoundError):
+                        pass
+                    i += 1
+                except OSError:
+                    break
+            winreg.CloseKey(key)
+        except (OSError, FileNotFoundError):
+            pass
+    return ""
+
+
+def _compare_versions(installed: str, new: str) -> int:
+    """So sánh 2 version string (ví dụ: "5.6.1" vs "5.6.2").
+
+    Returns:
+        -1 nếu installed < new (cần update)
+         0 nếu installed == new (đã cài rồi)
+         1 nếu installed > new (đã có bản mới hơn)
+    """
+    def _parse(v: str) -> tuple:
+        import re
+        parts = re.split(r'[.\-]', v.strip())
+        result = []
+        for p in parts:
+            try:
+                result.append(int(p))
+            except ValueError:
+                result.append(0)
+        return tuple(result)
+
+    t1 = _parse(installed)
+    t2 = _parse(new)
+    # Pad shorter tuple with zeros
+    max_len = max(len(t1), len(t2))
+    t1 = t1 + (0,) * (max_len - len(t1))
+    t2 = t2 + (0,) * (max_len - len(t2))
+    if t1 < t2:
+        return -1
+    elif t1 == t2:
+        return 0
+    else:
+        return 1
+
+
 def _is_installed_via_registry(pkg_id: str) -> bool:
     """Check app đã cài chưa qua registry Uninstall keys.
 
@@ -1856,6 +1956,21 @@ class SoftwareManager:
         if not os.path.isfile(archive_path):
             return f"[error] Không tìm thấy file: {archive_path}"
 
+        # --- Kiểm tra version ---
+        new_ver = _extract_version_from_filename(os.path.basename(archive_path))
+        if new_ver:
+            installed_ver = _get_installed_version("htkk")
+            if installed_ver:
+                cmp = _compare_versions(installed_ver, new_ver)
+                if cmp == 0:
+                    _audit("INSTALL_HTKK", f"same version {installed_ver}, skip", "SKIP")
+                    return f"[ok] HTKK v{installed_ver} đã được cài sẵn (cùng version). Không cần cài lại."
+                elif cmp > 0:
+                    _audit("INSTALL_HTKK", f"installed {installed_ver} > new {new_ver}, skip", "SKIP")
+                    return f"[ok] HTKK v{installed_ver} đã có (mới hơn v{new_ver}). Không cần cài lại."
+                else:
+                    _emit_progress(f"Đang nâng cấp HTKK: v{installed_ver} → v{new_ver}")
+
         # --- Bước 1: Tìm và gỡ HTKK cũ ---
         _emit_progress("Đang kiểm tra HTKK phiên bản cũ...")
         uninstall_result = self._uninstall_htkk()
@@ -2054,6 +2169,22 @@ class SoftwareManager:
 
         if not os.path.isfile(archive_path):
             return f"[error] Không tìm thấy file: {archive_path}"
+
+        # --- Kiểm tra version ---
+        new_ver = _extract_version_from_filename(os.path.basename(archive_path))
+        app_keyword = shortcut_name.lower().replace(" ", "") if shortcut_name else ""
+        if new_ver and app_keyword:
+            installed_ver = _get_installed_version(app_keyword)
+            if installed_ver:
+                cmp = _compare_versions(installed_ver, new_ver)
+                if cmp == 0:
+                    _audit("INSTALL_TAX", f"{shortcut_name} same version {installed_ver}, skip", "SKIP")
+                    return f"[ok] {shortcut_name} v{installed_ver} đã được cài sẵn (cùng version). Không cần cài lại."
+                elif cmp > 0:
+                    _audit("INSTALL_TAX", f"{shortcut_name} installed {installed_ver} > new {new_ver}, skip", "SKIP")
+                    return f"[ok] {shortcut_name} v{installed_ver} đã có (mới hơn v{new_ver}). Không cần cài lại."
+                else:
+                    _emit_progress(f"Đang nâng cấp {shortcut_name}: v{installed_ver} → v{new_ver}")
 
         ext = os.path.splitext(archive_path)[1].lower()
 
