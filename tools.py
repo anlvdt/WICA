@@ -1843,9 +1843,10 @@ class SoftwareManager:
         2. Sau cài xong, cần chạy với quyền Admin lần đầu để đăng ký DLL
         3. Shortcut phải luôn "Run as Administrator"
 
-        Flow mới (silent):
-        - Giải nén .rar → tìm HTKK.msi → msiexec /quiet → đợi xong → tạo shortcut
-        - Không cần click gì cả
+        Flow mới:
+        - Giải nén .rar → tìm setup.exe → chạy (UI, đợi xong) → tạo shortcut
+        - HTKK dùng InstallShield (setup.exe + HTKK.msi + Data1.cab)
+        - Chạy trực tiếp MSI bằng msiexec thường FAIL (1603) vì thiếu prerequisites
 
         EDR-safe: msiexec = Microsoft-signed + winreg + COM shortcut + binary patch.
         """
@@ -1867,16 +1868,32 @@ class SoftwareManager:
         if not extract_dir:
             return f"[error] Không giải nén được: {os.path.basename(archive_path)}"
 
-        # --- Bước 3: Tìm MSI và cài silent ---
-        msi_file = self._find_msi(extract_dir)
-        if msi_file:
-            # Ưu tiên MSI silent install (không cần click)
-            _emit_progress(f"Đang cài HTKK silent (MSI)...")
-            success, install_result = self._run_installer_silent(msi_file, timeout=300)
+        # --- Bước 3: Cài HTKK ---
+        # HTKK dùng InstallShield (setup.exe + HTKK.msi + Data1.cab).
+        # Chạy trực tiếp HTKK.msi bằng msiexec thường FAIL (1603)
+        # vì MSI cần Data1.cab và prerequisites do setup.exe quản lý.
+        # → Ưu tiên setup.exe (có UI, user click qua wizard)
+        # → Fallback: msiexec nếu không có setup.exe
+        installer = self._find_installer(extract_dir)
+        if installer and os.path.basename(installer).lower() in ("setup.exe", "install.exe"):
+            # Chạy setup.exe (InstallShield) — có UI, đợi xong
+            _emit_progress(f"Đang chạy installer HTKK: {os.path.basename(installer)} ...")
+            _emit_progress(f"[...] Vui lòng click qua wizard cài đặt. WICA sẽ đợi...")
+            try:
+                os.startfile(installer)
+                _audit("INSTALL_HTKK", f"setup.exe started", "OK")
+                time.sleep(3)
+                _poll_installer_exit(os.path.basename(installer).lower(), 300)
+                install_result = f"[ok] Đã cài xong HTKK"
+            except OSError as e:
+                install_result = f"[error] Không chạy được installer: {e}"
         else:
-            # Fallback: tìm setup.exe và chạy silent
-            installer = self._find_installer(extract_dir)
-            if installer:
+            # Fallback: thử MSI silent
+            msi_file = self._find_msi(extract_dir)
+            if msi_file:
+                _emit_progress(f"Đang cài HTKK silent (MSI)...")
+                success, install_result = self._run_installer_silent(msi_file, timeout=300)
+            elif installer:
                 _emit_progress(f"Đang cài HTKK...")
                 success, install_result = self._run_installer_silent(installer, timeout=300)
             else:
