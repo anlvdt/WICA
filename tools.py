@@ -13,8 +13,10 @@ Defender/CrowdStrike Falcon compatibility rules:
 import subprocess
 import winreg
 import logging
+import logging.handlers
 import os
 import platform
+import re
 import shutil
 import time
 import threading
@@ -33,9 +35,9 @@ from shared_constants import (
     _ICACLS_BLOCKED_FLAGS, _CIPHER_BLOCKED_FLAGS,
     _FSUTIL_BLOCKED_SUBCMDS, _DISM_BLOCKED_FLAGS,
     _CHKDSK_BLOCKED_FLAGS, _W32TM_BLOCKED_FLAGS,
+    _CLI_SHELL_OPERATORS, AUDIT_LOG_RETENTION_DAYS,
 )
 from privilege import is_elevated, enable_privilege
-from datetime import datetime
 
 try:
     import win32com.client
@@ -43,18 +45,36 @@ try:
 except ImportError:
     _HAS_WIN32COM = False
 
-# --- Audit Logger ---
+# --- Audit Logger (with rotation + cleanup) ---
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 audit_logger = logging.getLogger("antigravity.audit")
 audit_logger.setLevel(logging.INFO)
-_handler = logging.FileHandler(
-    os.path.join(LOG_DIR, f"audit_{datetime.now():%Y%m%d}.log"),
-    encoding="utf-8"
+_handler = logging.handlers.TimedRotatingFileHandler(
+    os.path.join(LOG_DIR, "audit.log"),
+    when="midnight", interval=1,
+    backupCount=AUDIT_LOG_RETENTION_DAYS,
+    encoding="utf-8",
 )
+_handler.suffix = "%Y%m%d"
 _handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
 audit_logger.addHandler(_handler)
+
+# Dọn log cũ (file audit_YYYYMMDD.log từ format cũ) khi startup
+def _cleanup_old_logs():
+    """Xóa file log cũ hơn AUDIT_LOG_RETENTION_DAYS ngày. EDR-safe: chỉ os.remove."""
+    try:
+        cutoff = time.time() - AUDIT_LOG_RETENTION_DAYS * 86400
+        for f in os.listdir(LOG_DIR):
+            if f.startswith("audit") and f.endswith(".log"):
+                fp = os.path.join(LOG_DIR, f)
+                if os.path.getmtime(fp) < cutoff:
+                    os.remove(fp)
+    except Exception:
+        pass
+
+_cleanup_old_logs()
 
 
 def _audit(action: str, detail: str, status: str = "OK"):
@@ -80,6 +100,7 @@ _EXIT_CODE_MAP: dict[int, str] = {
     0x8A15000F: "Gói phần mềm không hỗ trợ hệ thống này",
     0x8A150010: "Installer đã chạy nhưng thất bại",
     0x8A150011: "Cần khởi động lại máy để hoàn tất",
+    0x8A150014: "Không tìm thấy installer phù hợp cho package này",
     1603:       "Cài đặt thất bại (MSI error) - có thể đang chạy phần mềm cũ",
     1602:       "Cài đặt bị hủy bởi người dùng",
     1618:       "Một tiến trình cài đặt khác đang chạy, đợi xong rồi thử lại",
@@ -107,6 +128,39 @@ def _explain_exit_code(code: int) -> str:
         if signed in _EXIT_CODE_MAP:
             return _EXIT_CODE_MAP[signed]
     return f"Mã lỗi: {code} (0x{code & 0xFFFFFFFF:08X})"
+
+
+# --- Internet connectivity check (EDR-safe: chỉ dùng socket stdlib) ---
+_INTERNET_CHECK_TIMEOUT = 3  # 3s — đủ nhanh để không block UI
+
+def _check_internet() -> bool:
+    """Kiểm tra máy có kết nối internet không.
+
+    Thử kết nối TCP tới DNS server phổ biến (port 53).
+    Fallback: HTTP HEAD tới Microsoft captive portal endpoint
+    (luôn mở trên corporate network, không bị firewall chặn).
+    EDR-safe: chỉ dùng socket (Python stdlib), không spawn process.
+    """
+    import socket
+    # Bước 1: TCP connect tới DNS (nhanh nhất)
+    for host, port in [("8.8.8.8", 53), ("1.1.1.1", 53)]:
+        try:
+            sock = socket.create_connection((host, port), timeout=_INTERNET_CHECK_TIMEOUT)
+            sock.close()
+            return True
+        except (OSError, socket.timeout):
+            continue
+    # Bước 2: HTTP connect tới Microsoft captive portal (corporate firewall friendly)
+    # Chỉ mở TCP tới port 80 — không gửi HTTP request, chỉ check kết nối
+    try:
+        sock = socket.create_connection(
+            ("www.msftconnecttest.com", 80), timeout=_INTERNET_CHECK_TIMEOUT
+        )
+        sock.close()
+        return True
+    except (OSError, socket.timeout):
+        pass
+    return False
 
 
 # --- Winget runner (EDR-safe) ---
@@ -1036,7 +1090,6 @@ def _extract_version_from_filename(filename: str) -> str:
     - CTSigningHub_signed_1.2.rar → 1.2
     - HTKK_v5.6.2.rar → 5.6.2
     """
-    import re
     # Bỏ extension
     name = os.path.splitext(filename)[0]
     # Tìm pattern version: v?X.Y.Z hoặc _X.Y.Z hoặc X.Y.Z
@@ -1103,7 +1156,6 @@ def _compare_versions(installed: str, new: str) -> int:
          1 nếu installed > new (đã có bản mới hơn)
     """
     def _parse(v: str) -> tuple:
-        import re
         parts = re.split(r'[.\-]', v.strip())
         result = []
         for p in parts:
@@ -1204,6 +1256,33 @@ def _get_installed_list() -> set:
     except Exception:
         _audit("INSTALLED_LIST", "winget list failed", "FAIL")
     return installed
+
+
+# --- Installed list cache (tránh gọi winget list N lần trong profile) ---
+_installed_cache_lock = threading.Lock()
+_installed_cache: set | None = None
+_installed_cache_time: float = 0
+_INSTALLED_CACHE_TTL = 300  # 5 phút — invalidate sau install/uninstall
+
+
+def _get_installed_list_cached() -> set:
+    """Cached version of _get_installed_list. TTL 5 phút, invalidate khi install/uninstall."""
+    global _installed_cache, _installed_cache_time
+    with _installed_cache_lock:
+        if _installed_cache is not None and (time.time() - _installed_cache_time) < _INSTALLED_CACHE_TTL:
+            return _installed_cache
+    result = _get_installed_list()
+    with _installed_cache_lock:
+        _installed_cache = result
+        _installed_cache_time = time.time()
+    return result
+
+
+def _invalidate_installed_cache():
+    """Gọi sau install/uninstall để force refresh cache."""
+    global _installed_cache
+    with _installed_cache_lock:
+        _installed_cache = None
 
 
 def _is_registry_set(config_name: str) -> bool:
@@ -1322,6 +1401,13 @@ class SoftwareManager:
                              "Microsoft365Setup.exe"],
     }
 
+    # Packages cài từ local (không có trên winget repo)
+    # Khi uninstall → dùng registry UninstallString thay vì winget
+    _LOCAL_ONLY_PACKAGES = {
+        "htkk", "htkk_dll", "itaxviewer", "itaxviewer_dll",
+        "ct_signinghub", "signinghub",
+    }
+
     def __init__(self, aliases: dict, local_paths: list[str] = None):
         # M7: validate alias keys are lowercase
         bad_keys = [k for k in aliases if k != k.lower()]
@@ -1333,6 +1419,73 @@ class SoftwareManager:
 
     def _resolve(self, name: str) -> str:
         return self.aliases.get(name.lower().strip(), name)
+
+    @staticmethod
+    def _winget_search_id(query: str) -> str:
+        """Search winget để tìm đúng package ID từ tên user gõ.
+
+        Trả về winget ID (vd: "Ollama.Ollama") hoặc "" nếu không tìm thấy.
+        Chỉ trả kết quả nếu có DUY NHẤT 1 match rõ ràng hoặc match đầu tiên
+        có tên chứa query.
+        EDR-safe: chỉ gọi winget.exe trực tiếp.
+        """
+        try:
+            proc = subprocess.Popen(
+                ["winget", "search", query, "--accept-source-agreements",
+                 "--disable-interactivity"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+            )
+            stdout, _ = proc.communicate(timeout=WINGET_LIST_TIMEOUT)
+            if proc.returncode != 0:
+                return ""
+            # Parse output: tìm dòng chứa query trong cột Name/Id
+            # Winget output format: Name  Id  Version  Source
+            # Header separator: dòng chứa toàn dấu -
+            lines = stdout.strip().split("\n")
+            header_idx = -1
+            for idx, line in enumerate(lines):
+                if line.startswith("--") or line.startswith("──"):
+                    header_idx = idx
+                    break
+            if header_idx < 0 or header_idx + 1 >= len(lines):
+                return ""
+            # Tìm vị trí cột Id từ header line trước separator
+            header_line = lines[header_idx - 1] if header_idx > 0 else ""
+            # Tìm cột bằng cách detect khoảng trắng lớn giữa các cột
+            data_lines = lines[header_idx + 1:]
+            if not data_lines:
+                return ""
+            query_lower = query.lower()
+            candidates = []
+            for line in data_lines:
+                if not line.strip():
+                    continue
+                # Split bằng 2+ spaces (winget dùng fixed-width columns)
+                parts = re.split(r'\s{2,}', line.strip())
+                if len(parts) >= 2:
+                    name_col = parts[0].strip()
+                    id_col = parts[1].strip()
+                    # Match: query có trong name hoặc id
+                    if (query_lower in name_col.lower()
+                            or query_lower in id_col.lower()):
+                        candidates.append(id_col)
+            if len(candidates) == 1:
+                _audit("WINGET_SEARCH", f"'{query}' → {candidates[0]}", "OK")
+                return candidates[0]
+            if len(candidates) > 1:
+                # Ưu tiên exact name match
+                for cid in candidates:
+                    if query_lower == cid.lower().split(".")[-1].lower():
+                        _audit("WINGET_SEARCH", f"'{query}' → {cid} (best match)", "OK")
+                        return cid
+                # Trả kết quả đầu tiên
+                _audit("WINGET_SEARCH", f"'{query}' → {candidates[0]} (first of {len(candidates)})", "OK")
+                return candidates[0]
+        except Exception:
+            pass
+        return ""
 
     def _try_local_fallback(self, pkg_id: str, prefer_local: bool = False) -> str:
         """Tìm installer local cho package khi winget fail.
@@ -1529,6 +1682,19 @@ class SoftwareManager:
         if cb:
             cb(f"Đang kiểm tra {package}...")
 
+        # --- Kiểm tra internet trước khi gọi winget ---
+        if cb:
+            cb("Đang kiểm tra kết nối internet...")
+        if not _check_internet():
+            _audit("INSTALL", f"no internet, trying local fallback for {pkg_id}", "WARN")
+            if cb:
+                cb("Không có internet — tìm installer offline...")
+            fallback = self._try_local_fallback(pkg_id)
+            if fallback:
+                return fallback
+            return (f"[error] Không có kết nối internet và không tìm thấy installer offline cho {package}.\n"
+                    f"Vui lòng kết nối mạng hoặc đặt file cài đặt vào thư mục local.")
+
         # --- Pre-check: kiểm tra version trước khi gọi winget (tiết kiệm 5-10s) ---
         # Tìm keyword từ winget ID: "Google.Chrome" → "chrome"
         pkg_parts = pkg_id.replace(".", " ").split()
@@ -1548,6 +1714,7 @@ class SoftwareManager:
             ]
             code, output = _run_winget_progress(upgrade_args)
             if code == 0:
+                _invalidate_installed_cache()
                 return f"[ok] Đã nâng cấp {package}: v{installed_ver} → bản mới nhất"
             out_lower = output.lower()
             if "no applicable update" in out_lower or "no installed package" in out_lower:
@@ -1584,6 +1751,7 @@ class SoftwareManager:
                 stop_tail.set()
                 tail_thread.join(timeout=3)
             if code == 0:
+                _invalidate_installed_cache()
                 return f"[ok] Đã cài đặt: {package} ({pkg_id})"
             elif "already installed" in output.lower():
                 return f"[info] {package} đã được cài rồi."
@@ -1598,6 +1766,7 @@ class SoftwareManager:
         ]
         code, output = _run_winget_progress(args)
         if code == 0:
+            _invalidate_installed_cache()
             return f"[ok] Đã cài đặt: {package} ({pkg_id})"
         elif "already installed" in output.lower():
             return f"[info] {package} đã được cài rồi."
@@ -1621,6 +1790,7 @@ class SoftwareManager:
             ]
             code, output = _run_winget_progress(retry_args)
             if code == 0:
+                _invalidate_installed_cache()
                 return f"[ok] Đã cài đặt: {package} ({pkg_id})"
             elif "already installed" in output.lower():
                 return f"[info] {package} đã được cài rồi."
@@ -1638,7 +1808,20 @@ class SoftwareManager:
                 msg += f"\nChi tiết: {err_detail}"
             return msg
         else:
-            # Winget fail lần đầu (lỗi khác) → thử local fallback
+            # Winget fail lần đầu (lỗi khác)
+            # Retry 1 lần cho error 1618 (another install in progress) — đợi 10s
+            if code == 1618 or (code & 0xFFFFFFFF) == 1618:
+                _audit("INSTALL_RETRY", f"1618 (busy), waiting 10s then retry {pkg_id}")
+                if cb:
+                    cb("Đang chờ tiến trình cài đặt khác hoàn tất (10s)...")
+                time.sleep(10)
+                code2, output2 = _run_winget_progress(args)
+                if code2 == 0:
+                    _invalidate_installed_cache()
+                    return f"[ok] Đã cài đặt: {package} ({pkg_id})"
+                elif "already installed" in output2.lower():
+                    return f"[info] {package} đã được cài rồi."
+            # Thử local fallback
             fallback = self._try_local_fallback(pkg_id)
             if fallback:
                 return fallback
@@ -1650,16 +1833,163 @@ class SoftwareManager:
                 msg += f"\nChi tiết: {last_err}"
             return msg
 
+    @staticmethod
+    def _uninstall_via_registry(search_keyword: str) -> str:
+        """Gỡ phần mềm qua registry UninstallString — cho app không có trên winget.
+
+        Tìm trong Uninstall keys theo DisplayName chứa keyword.
+        Thử MSI silent trước, fallback chạy UninstallString trực tiếp.
+        EDR-safe: winreg + msiexec (Microsoft-signed).
+        """
+        search = search_keyword.lower().replace("_dll", "").replace("_", " ").strip()
+        # Tạo nhiều variants để match linh hoạt:
+        # "ct_signinghub" → ["ct signinghub", "ctsigninghub", "signinghub"]
+        search_variants = {search, search.replace(" ", "")}
+        # Thêm variant bỏ prefix phổ biến (ct, vn...)
+        for prefix in ("ct ", "vn "):
+            if search.startswith(prefix):
+                search_variants.add(search[len(prefix):])
+                search_variants.add(search[len(prefix):].replace(" ", ""))
+        uninstall_paths = [
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ]
+        for hive, reg_path in uninstall_paths:
+            try:
+                key = winreg.OpenKey(hive, reg_path, 0, winreg.KEY_READ)
+                i = 0
+                while True:
+                    try:
+                        subkey_name = winreg.EnumKey(key, i)
+                        try:
+                            sk = winreg.OpenKey(key, subkey_name, 0, winreg.KEY_READ)
+                            display_name, _ = winreg.QueryValueEx(sk, "DisplayName")
+                            dn_lower = display_name.lower()
+                            dn_nospace = dn_lower.replace(" ", "")
+                            if any(v in dn_lower or v in dn_nospace for v in search_variants):
+                                version = ""
+                                try:
+                                    version, _ = winreg.QueryValueEx(sk, "DisplayVersion")
+                                except (OSError, FileNotFoundError):
+                                    pass
+                                try:
+                                    uninstall_str, _ = winreg.QueryValueEx(sk, "UninstallString")
+                                except (OSError, FileNotFoundError):
+                                    winreg.CloseKey(sk)
+                                    i += 1
+                                    continue
+                                winreg.CloseKey(sk)
+                                winreg.CloseKey(key)
+
+                                uninstall_str = uninstall_str.strip().strip('"')
+                                _audit("UNINSTALL_REGISTRY",
+                                       f"found: {display_name} v{version}", "OK")
+                                _emit_progress(f"Đang gỡ {display_name} v{version}...")
+
+                                # MSI silent uninstall
+                                is_msi_guid = bool(re.match(r'^\{[0-9A-Fa-f\-]+\}$', subkey_name))
+                                is_msiexec = "msiexec" in uninstall_str.lower()
+                                if is_msi_guid or is_msiexec:
+                                    product_code = subkey_name if is_msi_guid else ""
+                                    if not product_code:
+                                        guid_match = re.search(r'\{[0-9A-Fa-f\-]+\}', uninstall_str)
+                                        product_code = guid_match.group(0) if guid_match else ""
+                                    if product_code:
+                                        try:
+                                            proc = subprocess.Popen(
+                                                ["msiexec", "/x", product_code, "/quiet", "/norestart"],
+                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                creationflags=CREATE_NO_WINDOW,
+                                            )
+                                            proc.communicate(timeout=120)
+                                            if proc.returncode == 0:
+                                                _invalidate_installed_cache()
+                                                return f"[ok] Đã gỡ {display_name} v{version}"
+                                        except Exception:
+                                            pass
+
+                                # Fallback 1: chạy UninstallString qua subprocess
+                                try:
+                                    import shlex as _shlex
+                                    parts = _shlex.split(uninstall_str)
+                                    proc = subprocess.Popen(
+                                        parts, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        creationflags=CREATE_NO_WINDOW,
+                                    )
+                                    proc.communicate(timeout=120)
+                                    time.sleep(2)
+                                    if not _is_installed_via_registry(search):
+                                        _invalidate_installed_cache()
+                                        return f"[ok] Đã gỡ {display_name} v{version}"
+                                except Exception:
+                                    pass
+
+                                # Fallback 2: os.startfile — giống user double-click uninstaller
+                                # EDR-safe: ShellExecuteW, hiện UI cho user thao tác
+                                try:
+                                    _emit_progress(f"Đang mở uninstaller {display_name}...")
+                                    # Tìm exe path từ UninstallString
+                                    uninstall_exe = uninstall_str.split('"')[0] or uninstall_str.split()[0]
+                                    if os.path.isfile(uninstall_exe):
+                                        os.startfile(uninstall_exe)
+                                    else:
+                                        os.startfile(uninstall_str)
+                                    _invalidate_installed_cache()
+                                    return (f"[ok] Đã mở uninstaller: {display_name} v{version}\n"
+                                            f"Cửa sổ gỡ cài đặt sẽ hiện lên, bạn thao tác bình thường.")
+                                except Exception as e:
+                                    return f"[error] Không gỡ được {display_name}: {e}"
+                        except (OSError, FileNotFoundError):
+                            pass
+                        i += 1
+                    except OSError:
+                        break
+                winreg.CloseKey(key)
+            except (OSError, FileNotFoundError):
+                pass
+        return f"[info] Không tìm thấy {search_keyword} trên máy."
+
     def uninstall(self, package: str) -> str:
         pkg_id = self._resolve(package)
         _audit("UNINSTALL", f"package={package} resolved={pkg_id}")
+
+        # Phần mềm local (HTKK, iTaxViewer...) → gỡ qua registry, không qua winget
+        if pkg_id.lower() in self._LOCAL_ONLY_PACKAGES:
+            return self._uninstall_via_registry(pkg_id)
+
+        # Bước 1: winget uninstall --id exact match
         args = ["uninstall", "--id", pkg_id, "-e"]
         code, output = _run_winget_progress(args)
         if code == 0:
-            return f"[ok] \u0110\u00e3 g\u1ee1: {package}"
-        else:
-            reason = _explain_exit_code(code)
-            return f"[error] L\u1ed7i g\u1ee1 {package}: {reason}"
+            _invalidate_installed_cache()
+            return f"[ok] Đã gỡ: {package}"
+
+        # Bước 2: winget uninstall fuzzy (không -e) — match tên gần đúng
+        out_lower = output.lower()
+        if ("no installed package" in out_lower or "not found" in out_lower
+                or code in (0x8A150014, 2316632084)):
+            _audit("UNINSTALL", f"exact match fail, trying fuzzy for {package}")
+            args_fuzzy = ["uninstall", pkg_id]
+            code2, output2 = _run_winget_progress(args_fuzzy)
+            if code2 == 0:
+                _invalidate_installed_cache()
+                return f"[ok] Đã gỡ: {package}"
+            # Bước 3: thử tên gốc (không qua alias) nếu khác pkg_id
+            if package.lower() != pkg_id.lower():
+                args_name = ["uninstall", package]
+                code3, output3 = _run_winget_progress(args_name)
+                if code3 == 0:
+                    _invalidate_installed_cache()
+                    return f"[ok] Đã gỡ: {package}"
+
+        # Bước 4: fallback registry uninstall
+        fallback = self._uninstall_via_registry(package)
+        if "[ok]" in fallback:
+            return fallback
+
+        reason = _explain_exit_code(code)
+        return f"[error] Lỗi gỡ {package}: {reason}"
 
     def uninstall_system(self, pkg_id: str) -> str:
         """Gỡ app system-wide (tất cả user) qua winget."""
@@ -1668,6 +1998,7 @@ class SoftwareManager:
         # M4: uninstall_system uses shorter timeout
         code, output = _run_winget_progress(args, timeout=CLI_TIMEOUT)
         if code == 0:
+            _invalidate_installed_cache()
             return f"[ok] Đã gỡ: {pkg_id}"
         elif "no installed package" in output.lower() or "not found" in output.lower():
             return f"[info] Không có: {pkg_id}"
@@ -1714,7 +2045,6 @@ class SoftwareManager:
         new_ver = _extract_version_from_filename(fname)
         if new_ver:
             # Tạo keyword tìm kiếm từ tên file (bỏ version, extension)
-            import re
             app_keyword = re.sub(r'[_\s]?v?\d+[\d.]*', '', os.path.splitext(fname)[0])
             app_keyword = re.sub(r'[_\-]?(signed|setup|install|portable|x64|x86)', '',
                                  app_keyword, flags=re.IGNORECASE).strip('_- ')
@@ -2161,8 +2491,7 @@ class SoftwareManager:
 
                                 # --- Silent uninstall ---
                                 # Cách 1: MSI product code (subkey_name là GUID)
-                                import re as _re
-                                is_msi_guid = bool(_re.match(
+                                is_msi_guid = bool(re.match(
                                     r'^\{[0-9A-Fa-f\-]+\}$', subkey_name))
                                 is_msiexec = "msiexec" in uninstall_str.lower()
 
@@ -2171,7 +2500,7 @@ class SoftwareManager:
                                     product_code = subkey_name if is_msi_guid else ""
                                     if not product_code:
                                         # Trích GUID từ UninstallString
-                                        guid_match = _re.search(
+                                        guid_match = re.search(
                                             r'\{[0-9A-Fa-f\-]+\}', uninstall_str)
                                         product_code = guid_match.group(0) if guid_match else ""
 
@@ -2343,6 +2672,14 @@ class SoftwareManager:
     def upgrade_all(self) -> str:
         """Cập nhật tất cả phần mềm đã cài qua winget upgrade --all."""
         _audit("UPGRADE_ALL", "starting")
+        # Kiểm tra internet trước — upgrade cần tải package từ mạng
+        with _cb_lock:
+            cb = _progress_callback
+        if cb:
+            cb("Đang kiểm tra kết nối internet...")
+        if not _check_internet():
+            _audit("UPGRADE_ALL", "no internet", "FAIL")
+            return "[error] Không có kết nối internet. Cần mạng để cập nhật phần mềm qua winget."
         args = [
             "upgrade", "--all",
             "--accept-package-agreements",
@@ -2686,11 +3023,10 @@ class SystemConfigurator:
         - HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters
         Cần restart để có hiệu lực.
         """
-        import re as _re
         new_name = new_name.strip()
         if not new_name or len(new_name) > 15:
             return "[error] Tên máy phải từ 1-15 ký tự"
-        if not _re.match(r'^[A-Za-z0-9\-]+$', new_name):
+        if not re.match(r'^[A-Za-z0-9\-]+$', new_name):
             return "[error] Tên máy chỉ được chứa chữ, số và dấu gạch ngang"
         _audit("HOSTNAME_SET", f"new={new_name}")
         errors = []
@@ -2718,6 +3054,280 @@ class SystemConfigurator:
         if errors:
             return "[error] Lỗi đặt tên máy:\n" + "\n".join(errors)
         return f"[ok] Đã đặt tên máy: {new_name}\nCần khởi động lại để có hiệu lực."
+
+
+# --- Clean Start Menu (system-level) ---
+
+# Danh sách shortcut quảng cáo/giải trí thường thấy trên Start Menu Win 11
+# Tên file .lnk (case-insensitive) trong ProgramData\Microsoft\Windows\Start Menu
+_START_MENU_JUNK_KEYWORDS = {
+    # Games / Entertainment
+    "candy crush", "farm heroes", "bubble witch", "royal revolt",
+    "solitaire", "minecraft", "roblox", "fortnite",
+    "disney", "spotify", "tiktok", "netflix", "hulu",
+    "amazon prime", "apple tv", "apple music",
+    # Social / Messaging (promoted, not user-installed)
+    "whatsapp", "messenger", "instagram", "facebook",
+    "snapchat", "linkedin",
+    # Misc promoted
+    "clipchamp", "quick assist", "get help", "tips",
+    "mixed reality", "3d viewer", "3d builder",
+    "phone link", "your phone",
+    # OEM bloatware patterns
+    "mcafee", "norton", "avast", "avg ",
+    "dropbox", "evernote", "booking.com",
+    "candy", "gardenscapes", "homescapes",
+    "hidden city", "march of empires", "age of empires",
+    "asphalt", "cooking fever",
+}
+
+# ContentDeliveryManager values cần disable (DWORD = 0)
+# Áp dụng cho tất cả user + default profile → user mới cũng sạch
+_CDM_DISABLE_VALUES = [
+    ("ContentDeliveryAllowed", 0, winreg.REG_DWORD),
+    ("OemPreInstalledAppsEnabled", 0, winreg.REG_DWORD),
+    ("PreInstalledAppsEnabled", 0, winreg.REG_DWORD),
+    ("PreInstalledAppsEverEnabled", 0, winreg.REG_DWORD),
+    ("SilentInstalledAppsEnabled", 0, winreg.REG_DWORD),
+    ("SoftLandingEnabled", 0, winreg.REG_DWORD),
+    ("SystemPaneSuggestionsEnabled", 0, winreg.REG_DWORD),
+    ("SubscribedContent-310093Enabled", 0, winreg.REG_DWORD),
+    ("SubscribedContent-338388Enabled", 0, winreg.REG_DWORD),
+    ("SubscribedContent-338389Enabled", 0, winreg.REG_DWORD),
+    ("SubscribedContent-338393Enabled", 0, winreg.REG_DWORD),
+    ("SubscribedContent-353694Enabled", 0, winreg.REG_DWORD),
+    ("SubscribedContent-353696Enabled", 0, winreg.REG_DWORD),
+    ("SubscribedContent-88000326Enabled", 0, winreg.REG_DWORD),
+]
+
+_CDM_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+
+
+def _apply_batch_to_default_profile(key_path: str,
+                                    values: list[tuple]) -> int:
+    """Ghi nhiều registry values vào Default User profile trong 1 lần load/unload.
+
+    Tránh load/unload NTUSER.DAT nhiều lần (chậm + lock risk).
+    EDR-safe: chỉ dùng winreg module.
+
+    Args:
+        key_path: Registry key path (relative to user hive root)
+        values: List of (value_name, value_data, value_type) tuples
+
+    Returns:
+        Số values ghi thành công
+    """
+    if not is_elevated():
+        _audit("DEFAULT_PROFILE_BATCH", "skipped — not elevated", "SKIP")
+        return 0
+
+    sys_drive = os.environ.get("SystemDrive", "C:")
+    ntuser_path = os.path.join(sys_drive + os.sep, "Users", "Default", "NTUSER.DAT")
+
+    if not os.path.exists(ntuser_path):
+        _audit("DEFAULT_PROFILE_BATCH", f"NTUSER.DAT not found: {ntuser_path}", "WARN")
+        return 0
+
+    enable_privilege("SeRestorePrivilege")
+    enable_privilege("SeBackupPrivilege")
+
+    mount_key = "_WICA_DEFAULT_BATCH"
+    ok_count = 0
+
+    try:
+        winreg.LoadKey(winreg.HKEY_USERS, mount_key, ntuser_path)
+        _audit("DEFAULT_PROFILE_BATCH", f"loaded {ntuser_path}", "OK")
+
+        full_path = f"{mount_key}\\{key_path}"
+        try:
+            key = winreg.CreateKeyEx(winreg.HKEY_USERS, full_path, 0,
+                                     winreg.KEY_SET_VALUE)
+            for val_name, val_data, val_type in values:
+                try:
+                    winreg.SetValueEx(key, val_name, 0, val_type, val_data)
+                    ok_count += 1
+                except Exception as e:
+                    _audit("DEFAULT_PROFILE_BATCH",
+                           f"set {val_name} failed: {e}", "FAIL")
+            winreg.CloseKey(key)
+        except Exception as e:
+            _audit("DEFAULT_PROFILE_BATCH", f"open key failed: {e}", "FAIL")
+
+        try:
+            winreg.UnloadKey(winreg.HKEY_USERS, mount_key)
+        except Exception as e:
+            _audit("DEFAULT_PROFILE_BATCH", f"unload failed: {e}", "FAIL")
+            return ok_count
+
+        _audit("DEFAULT_PROFILE_BATCH",
+               f"wrote {ok_count}/{len(values)} values", "OK")
+        return ok_count
+
+    except PermissionError:
+        _audit("DEFAULT_PROFILE_BATCH", "LoadKey permission denied", "FAIL")
+        return 0
+    except OSError as e:
+        if e.winerror == 32:
+            _audit("DEFAULT_PROFILE_BATCH",
+                   "NTUSER.DAT locked (Default user logged in?)", "WARN")
+        else:
+            _audit("DEFAULT_PROFILE_BATCH", f"LoadKey error: {e}", "FAIL")
+        return 0
+
+
+def clean_start_menu() -> str:
+    """Dọn Start Menu Windows 11 ở cấp system-level.
+
+    3 bước:
+    1. Disable ContentDeliveryManager cho tất cả user + default profile
+       → Ngăn Windows tự cài/pin app quảng cáo cho user hiện tại VÀ user mới
+    2. Disable Microsoft consumer experiences qua HKLM policy (CloudContent)
+       → Chặn ở cấp máy, không phụ thuộc user
+    3. Xóa shortcut quảng cáo trong thư mục Start Menu chung (ProgramData)
+       → Dọn sạch các .lnk rác đã có sẵn
+
+    EDR-safe: chỉ dùng winreg + os (Python stdlib), KHÔNG PowerShell.
+    """
+    _audit("CLEAN_START_MENU", "starting system-level cleanup")
+    results = []
+    errors = []
+
+    # === BƯỚC 1: Disable ContentDeliveryManager cho tất cả user ===
+    cdm_ok = 0
+    cdm_fail = 0
+    for val_name, val_data, val_type in _CDM_DISABLE_VALUES:
+        ok_c, fail_c, errs = _set_registry_all_users(
+            _CDM_KEY, val_name, val_data, val_type
+        )
+        cdm_ok += ok_c
+        cdm_fail += fail_c
+        errors.extend(errs)
+
+    # Ghi vào Default profile cho user mới — batch 1 lần load/unload
+    default_ok = _apply_batch_to_default_profile(
+        _CDM_KEY, _CDM_DISABLE_VALUES
+    )
+
+    if cdm_ok > 0:
+        results.append(f"ContentDeliveryManager: disabled {len(_CDM_DISABLE_VALUES)} values "
+                       f"cho {cdm_ok} user")
+    if default_ok > 0:
+        results.append(f"Default profile: disabled {default_ok} values (user mới sẽ sạch)")
+
+    # === BƯỚC 2: Disable Microsoft consumer experiences (HKLM policy) ===
+    # Chặn promoted apps ở cấp máy — áp dụng cho TẤT CẢ user
+    cloud_content_key = r"SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+    cloud_values = [
+        ("DisableWindowsConsumerFeatures", 1, winreg.REG_DWORD),
+        ("DisableSoftLanding", 1, winreg.REG_DWORD),
+        ("DisableCloudOptimizedContent", 1, winreg.REG_DWORD),
+    ]
+    cloud_ok = 0
+    for val_name, val_data, val_type in cloud_values:
+        ok, msg = _set_registry(
+            winreg.HKEY_LOCAL_MACHINE, cloud_content_key,
+            val_name, val_data, val_type
+        )
+        if ok:
+            cloud_ok += 1
+        else:
+            errors.append(msg)
+    if cloud_ok > 0:
+        results.append(f"CloudContent policy: {cloud_ok} rules applied (chặn promoted apps)")
+
+    # === BƯỚC 3: Xóa shortcut quảng cáo trong Start Menu chung ===
+    start_menu_dirs = []
+    # ProgramData Start Menu (system-wide)
+    pd = os.environ.get("ProgramData", r"C:\ProgramData")
+    start_menu_dirs.append(os.path.join(pd, "Microsoft", "Windows", "Start Menu", "Programs"))
+    # Cũng check thư mục Start Menu gốc
+    start_menu_dirs.append(os.path.join(pd, "Microsoft", "Windows", "Start Menu"))
+
+    deleted_count = 0
+    for sm_dir in start_menu_dirs:
+        if not os.path.isdir(sm_dir):
+            continue
+        sm_real = os.path.realpath(sm_dir)
+        for root, dirs, files in os.walk(sm_dir, followlinks=False):
+            # Path traversal guard — đảm bảo không escape ra ngoài
+            if not os.path.realpath(root).startswith(sm_real):
+                continue
+            for fname in files:
+                if not fname.lower().endswith(".lnk"):
+                    continue
+                fname_lower = fname.lower()
+                for keyword in _START_MENU_JUNK_KEYWORDS:
+                    if keyword in fname_lower:
+                        fpath = os.path.join(root, fname)
+                        # Double-check path vẫn nằm trong scope
+                        if not os.path.realpath(fpath).startswith(sm_real):
+                            _audit("CLEAN_START_MENU",
+                                   f"path escape blocked: {fpath}", "WARN")
+                            break
+                        try:
+                            os.remove(fpath)
+                            deleted_count += 1
+                            _audit("CLEAN_START_MENU", f"deleted: {fpath}", "OK")
+                        except Exception as e:
+                            _audit("CLEAN_START_MENU",
+                                   f"delete failed: {fpath} — {e}", "WARN")
+                        break
+
+    if deleted_count > 0:
+        results.append(f"Đã xóa {deleted_count} shortcut quảng cáo trong Start Menu")
+
+    # === Tổng kết ===
+    if not results and errors:
+        err_detail = "; ".join(errors[:3])
+        return (f"[error] Không dọn được Start Menu\n"
+                f"  Chi tiết: {err_detail}\n"
+                f"  Gợi ý: chạy WICA với quyền Admin")
+    if not results and not errors:
+        return "[info] Start Menu đã sạch, không cần dọn thêm"
+
+    summary = "[ok] Dọn Start Menu xong:\n  " + "\n  ".join(results)
+    if errors:
+        summary += f"\n  (Cảnh báo: {len(errors)} lỗi nhỏ)"
+    return summary
+
+
+def _is_start_menu_clean() -> bool:
+    """Kiểm tra Start Menu đã được dọn chưa (cho smart skip).
+
+    Check 2 điều kiện:
+    1. ContentDeliveryManager đã disable (SilentInstalledAppsEnabled = 0)
+    2. CloudContent policy đã set (DisableWindowsConsumerFeatures = 1)
+    """
+    # Check CloudContent policy (HKLM — reliable nhất)
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Policies\Microsoft\Windows\CloudContent",
+            0, winreg.KEY_READ
+        )
+        val, _ = winreg.QueryValueEx(key, "DisableWindowsConsumerFeatures")
+        winreg.CloseKey(key)
+        if val != 1:
+            return False
+    except (OSError, FileNotFoundError):
+        return False
+
+    # Check ContentDeliveryManager cho user hiện tại
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            _CDM_KEY,
+            0, winreg.KEY_READ
+        )
+        val, _ = winreg.QueryValueEx(key, "SilentInstalledAppsEnabled")
+        winreg.CloseKey(key)
+        if val != 0:
+            return False
+    except (OSError, FileNotFoundError):
+        # Key chưa tồn tại = chưa disable
+        return False
+
+    return True
 
 
 # --- CLI Command Runner ---
@@ -2755,6 +3365,11 @@ def _run_cli_command(command_str: str, timeout: int = CLI_TIMEOUT) -> str:
     exe = parts[0].lower().strip('"').strip("'")
     exe_base = exe.replace(".exe", "")
     args_lower = [a.lower() for a in parts[1:]]
+
+    # --- Shell operator check (pipe/redirect/chain) ---
+    if _CLI_SHELL_OPERATORS.search(command_str):
+        _audit("CLI_BLOCKED", f"shell operator in: {command_str[:80]}", "FAIL")
+        return "[error] Lệnh chứa ký tự shell (| > < & `) không được phép."
 
     # --- Blacklist check ---
     if exe_base in _CLI_BLACKLIST or exe in _CLI_BLACKLIST:

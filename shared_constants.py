@@ -1,8 +1,24 @@
 # -*- coding: utf-8 -*-
 """Shared constants — single source of truth for CLI whitelist, timeouts, etc.
 
-Imported by tools.py và fast_commands.py để tránh duplicate.
+Imported by tools.py, fast_commands.py, main.py để tránh duplicate.
 """
+import re as _re
+import unicodedata as _ucd
+
+
+# --- Shared utility: Vietnamese accent removal ---
+def no_accent(s: str) -> str:
+    """Chuyển tiếng Việt có dấu → không dấu để so sánh fuzzy.
+
+    Dùng NFD decomposition — xử lý đúng cả đ/Đ.
+    Single source of truth — import từ đây thay vì duplicate.
+    """
+    result = "".join(
+        c for c in _ucd.normalize("NFD", s.lower())
+        if _ucd.category(c) != "Mn"
+    )
+    return result.replace("đ", "d").replace("Đ", "d")
 
 # --- Timeout constants (seconds) ---
 WINGET_TIMEOUT = 600          # 10 phút cho install/uninstall đơn
@@ -152,3 +168,11 @@ _W32TM_BLOCKED_FLAGS = {"/config", "/register", "/unregister"}
 
 # cipher: chặn /w (wipe free space) — gây chú ý EDR
 _CIPHER_BLOCKED_FLAGS = {"/w"}
+
+# --- CLI shell operator blocklist ---
+# Chặn pipe/redirect/chain trong CLI command string (dù shell=False không execute,
+# nhưng validate rõ ràng để tránh confusion và log rõ intent)
+_CLI_SHELL_OPERATORS = _re.compile(r'[|><&`]')
+
+# --- Log rotation ---
+AUDIT_LOG_RETENTION_DAYS = 30  # Giữ log tối đa 30 ngày

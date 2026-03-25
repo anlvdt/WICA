@@ -5,6 +5,7 @@ Các lệnh rõ ràng (cài X, gỡ Y, bật dark mode...) được xử lý loc
 bằng regex matching. Chỉ gọi LLM khi câu lệnh mơ hồ/phức tạp.
 """
 import re
+from shared_constants import no_accent as _no_accent
 
 # Patterns cho các lệnh phổ biến
 INSTALL_PATTERNS = [
@@ -169,6 +170,10 @@ DIAGNOSTIC_PATTERNS = {
     r"(?:g[oỡ]|go|x[oó]a|xoa|remove|delete)\s*(?:bloatware|r[aá]c|rac|app r[aá]c|app rac)": [
         {"type": "remove_bloatware"},
     ],
+    # Dọn Start Menu
+    r"(?:d[oọ]n|don|clean|x[oó]a|xoa|remove|clear)\s*(?:start\s*menu|startmenu|icon\s*(?:r[aá]c|rac|qu[aả]ng\s*c[aá]o|quang cao|gi[aả]i\s*tr[ií]|giai tri))": [
+        {"type": "clean_start_menu"},
+    ],
 }
 
 
@@ -213,13 +218,23 @@ def parse_fast(text: str, quick_commands: dict = None) -> list[dict] | None:
         stripped = re.sub(
             r"^(?:cài đặt|cai dat|cài|cai|setup|copy)\s+", "", text_lower
         ).strip()
+        text_na = _no_accent(text_lower)
+        stripped_na = _no_accent(stripped)
         for cmd_name, cmd_data in quick_commands.items():
+            cmd_na = _no_accent(cmd_name)
             if text_lower == cmd_name or stripped == cmd_name:
                 action = cmd_data.get("action", {})
                 if action:
                     return [action]
+            # Match không dấu
+            if text_na == cmd_na or stripped_na == cmd_na:
+                action = cmd_data.get("action", {})
+                if action:
+                    return [action]
             # Cũng match nếu user gõ "cài <tên>" hoặc "setup <tên>"
-            if stripped == cmd_name.replace("cài ", "").replace("cài đặt ", ""):
+            cmd_stripped = cmd_name.replace("cài ", "").replace("cài đặt ", "")
+            cmd_stripped_na = _no_accent(cmd_stripped)
+            if stripped == cmd_stripped or stripped_na == cmd_stripped_na:
                 action = cmd_data.get("action", {})
                 if action:
                     return [action]

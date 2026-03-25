@@ -11,6 +11,7 @@ if getattr(sys, 'frozen', False):
 from agent import AntiGravityAgent
 from tools import _cancel_winget
 from privilege import is_elevated, get_run_context, current_username
+from shared_constants import no_accent as _no_accent
 
 # --- Spinner frames cho loading animation ---
 SPINNER = ["●  ○  ○", "○  ●  ○", "○  ○  ●", "○  ●  ○"]
@@ -33,22 +34,6 @@ EMO = re.compile(
     r'\u231a-\u23ff\u25aa-\u25ff\u2b05-\u2b55'
     r'\u200d\ufe0f\u2705\u274c\u2139\ufe0f\u23f0\u23f3]+'
 )
-
-# Bảng chuyển đổi tiếng Việt có dấu → không dấu (dùng cho autocomplete)
-import unicodedata as _ucd
-
-
-def _no_accent(s: str) -> str:
-    """Chuyển tiếng Việt có dấu → không dấu để so sánh fuzzy.
-    Dùng NFD decomposition — xử lý đúng cả đ/Đ.
-    """
-    # NFD tách dấu ra khỏi ký tự gốc, lọc bỏ combining marks
-    result = "".join(
-        c for c in _ucd.normalize("NFD", s.lower())
-        if _ucd.category(c) != "Mn"
-    )
-    # đ không có combining mark riêng → replace thủ công
-    return result.replace("đ", "d").replace("Đ", "d")
 
 def _dark_titlebar(root):
     """Dark title bar — hỗ trợ cả Win 10 (attr 19) và Win 11 (attr 20)."""
@@ -584,8 +569,15 @@ class SettingsDialog:
 
     def _reconnect_llm(self):
         self._llm_status.configure(text="◌ Đang kết nối...", fg=C["progress"])
-        self.win.update()
-        self.app.agent._connect_llm()
+        # Chạy trong thread để không block UI
+        def _do_reconnect():
+            self.app.agent._connect_llm()
+            # Update UI từ main thread
+            self.win.after(0, self._update_llm_status)
+        threading.Thread(target=_do_reconnect, daemon=True).start()
+
+    def _update_llm_status(self):
+        """Cập nhật LLM status label sau khi reconnect xong."""
         if self.app.agent.client:
             self._llm_status.configure(
                 text=f"● Đã kết nối: {self.app.agent.provider_name} ({self.app.agent.model})",
@@ -649,6 +641,7 @@ class AutoComplete:
         self.widget.bind("<KeyRelease>", self._on_key, add="+")
         self.widget.bind("<Tab>", self._on_tab)
         self.widget.bind("<Escape>", self._on_escape, add="+")
+        self.widget.bind("<FocusOut>", self._on_focus_out, add="+")
 
     def _load_suggestions(self):
         """Load gợi ý từ config.yaml."""
@@ -662,8 +655,17 @@ class AutoComplete:
 
         items = set()
 
-        # Aliases → "cài <alias>"
-        for alias in cfg.get("aliases", {}).keys():
+        # Local-only packages — không gợi ý "cài/gỡ" qua alias
+        # (dùng quick commands thay thế, vd: "htkk", "cài htkk")
+        _local_only_values = {
+            "htkk", "htkk_dll", "itaxviewer", "itaxviewer_dll",
+            "ct_signinghub", "signinghub",
+        }
+
+        # Aliases → "cài <alias>" / "gỡ <alias>" (chỉ cho winget packages)
+        for alias, pkg_id in cfg.get("aliases", {}).items():
+            if pkg_id.lower() in _local_only_values:
+                continue  # Skip — dùng quick commands cho phần mềm local
             items.add(f"cài {alias}")
             items.add(f"gỡ {alias}")
 
@@ -681,6 +683,7 @@ class AutoComplete:
             "thông tin máy", "tên máy", "danh sách đã cài",
             "dark mode", "light mode", "hiện đuôi file", "hiện file ẩn",
             "taskbar trái", "taskbar giữa", "gỡ bloatware",
+            "dọn start menu", "xóa icon rác", "dọn icon quảng cáo",
             "tắt widget", "tắt weather", "tắt task view",
             "tắt thông báo", "tắt tips", "tắt bing", "tắt copilot",
             "tắt uac", "bật uac", "tắt telemetry",
@@ -818,6 +821,20 @@ class AutoComplete:
     def _on_click(self, e):
         self._accept()
 
+    def _on_focus_out(self, e):
+        """Dismiss autocomplete khi input mất focus."""
+        # Delay nhỏ để cho phép click vào listbox trước khi hide
+        self.root.after(150, self._hide_if_no_focus)
+
+    def _hide_if_no_focus(self):
+        """Hide popup nếu focus không nằm trong autocomplete."""
+        try:
+            focused = self.root.focus_get()
+            if focused != self.widget and focused != self.listbox:
+                self._hide()
+        except Exception:
+            self._hide()
+
     def navigate(self, direction):
         """Up/Down navigation trong popup. Returns True nếu đã xử lý."""
         if not self.listbox or not self.popup or not self.popup.winfo_exists():
@@ -885,9 +902,11 @@ class ChatApp:
             self._out_queue.put(("softvn", msg))
         self.agent._softvn_copy_cb = _softvn_ui_cb
         self._softvn_header_shown = False
+        self._chat_backup = None  # Buffer cho undo clear
         self.root.deiconify()  # Show after everything is ready
         self.root.state("zoomed")  # Maximize by default
         self.root.bind("<Control-l>", lambda e: self._clear())
+        self.root.bind("<Control-z>", self._undo_clear)
         self.root.bind("<Escape>", lambda e: self._cancel() if not self._cancelled and self._is_busy() else None)
         # Font zoom: Ctrl+Plus / Ctrl+Minus
         self.root.bind("<Control-equal>", lambda e: self._zoom_font(1))
@@ -996,25 +1015,25 @@ class ChatApp:
         self._spinner_text = text
 
     def _poll_output(self):
-        """Drain output queue — 1 item/cycle (50ms) để output hiện từ từ."""
-        try:
-            t, tag = self._out_queue.get_nowait()
-            if t == "softvn":
-                # SoftVN sync progress — tag chứa message thật
-                self._handle_softvn_msg(tag)
-            elif tag == "_ui_cmd":
-                if t == "clear":
-                    self._clear()
-                elif t == "help":
-                    self._clear()
-            elif tag == "set_status":
-                self._set_status(t)
-            elif tag == "_profile_retry":
-                self._show_retry_button(t["failed"], t["profile"])
-            else:
-                self._out(t, tag)
-        except queue.Empty:
-            pass
+        """Drain output queue — tối đa 8 items/cycle (50ms) để UI responsive hơn."""
+        for _ in range(8):
+            try:
+                t, tag = self._out_queue.get_nowait()
+                if t == "softvn":
+                    self._handle_softvn_msg(tag)
+                elif tag == "_ui_cmd":
+                    if t == "clear":
+                        self._clear()
+                    elif t == "help":
+                        self._clear()
+                elif tag == "set_status":
+                    self._set_status(t)
+                elif tag == "_profile_retry":
+                    self._show_retry_button(t["failed"], t["profile"])
+                else:
+                    self._out(t, tag)
+            except queue.Empty:
+                break
         self.root.after(50, self._poll_output)
 
     def _show_retry_button(self, failed_actions: list, profile_name: str):
@@ -1125,7 +1144,10 @@ class ChatApp:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_chat(self):
-        self.chat = DarkScroll(self.root, wrap=tk.WORD, state=tk.DISABLED,
+        # Chat container (for floating button overlay)
+        self._chat_container = tk.Frame(self.root, bg=C["bg"])
+        self._chat_container.pack(fill=tk.BOTH, expand=True)
+        self.chat = DarkScroll(self._chat_container, wrap=tk.WORD, state=tk.DISABLED,
             bg=C["bg"], fg=C["text"], font=FM, insertbackground=C["text"],
             selectbackground=C["accent_dim"], selectforeground="#1e1e2e",
             relief=tk.FLAT, padx=20, pady=14,
@@ -1152,8 +1174,18 @@ class ChatApp:
                           lmargin1=8, lmargin2=8),
             "hint": dict(foreground=C["text_dim"], font=("Segoe UI", 10),
                          lmargin1=8, lmargin2=8),
+            "ts": dict(foreground="#585b70", font=("Segoe UI", 9)),
+            "cli_header": dict(foreground="#6c7086", font=("Consolas", 10),
+                               lmargin1=12, lmargin2=12, underline=True),
         }.items():
             self.chat.tag_configure(n, **o)
+        # Scroll-to-bottom floating button (hidden by default)
+        self._scroll_btn = tk.Label(self._chat_container, text=" ↓ ", font=("Segoe UI Semibold", 11),
+                                     bg=C["accent_dim"], fg="#1e1e2e", padx=10, pady=3, cursor="hand2")
+        self._scroll_btn.bind("<Button-1>", lambda e: self._scroll_to_bottom())
+        self._scroll_btn.bind("<Enter>", lambda e: self._scroll_btn.configure(bg=C["accent"]))
+        self._scroll_btn.bind("<Leave>", lambda e: self._scroll_btn.configure(bg=C["accent_dim"]))
+        self._scroll_btn_visible = False
         # Right-click copy menu
         self._chat_menu = tk.Menu(self.root, tearoff=0, bg=C["bg_alt"], fg=C["text"],
                                   activebackground=C["accent"], activeforeground="#1e1e2e",
@@ -1173,14 +1205,18 @@ class ChatApp:
         bt = tk.Frame(row, bg=C["bg_alt"])
         bt.pack(side=tk.RIGHT, padx=(10, 0))
         self._mkb(bt, "File", self._pick).pack(side=tk.LEFT, padx=(0, 5))
-        self.btn_send = self._mkb(bt, "Gửi", self._send, True)
+        self.btn_send = self._mkb(bt, "Gửi  Enter", self._send, True)
         self.btn_send.pack(side=tk.LEFT)
-        self.btn_stop = self._mkb(bt, "Dừng", self._cancel)
+        self.btn_stop = self._mkb(bt, "Dừng  Esc", self._cancel)
         self.btn_stop.configure(bg=C["fail"], fg="#ffffff")
         self.btn_stop.bind("<Enter>", lambda e: self.btn_stop.configure(bg="#e05070"))
         self.btn_stop.bind("<Leave>", lambda e: self.btn_stop.configure(bg=C["fail"]))
+        # Input wrapper — border highlight khi focus, dim khi busy
+        self._input_wrapper = tk.Frame(row, bg=C["border"], bd=0, highlightthickness=2,
+                                        highlightbackground=C["border"], highlightcolor=C["border"])
+        self._input_wrapper.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         # Clean input — Antigravity style (borderless, generous padding)
-        self.ent = tk.Text(row, font=FI, height=2, wrap=tk.WORD,
+        self.ent = tk.Text(self._input_wrapper, font=FI, height=2, wrap=tk.WORD,
             bg=C["bg_input"], fg=C["text_dim"],
             insertbackground=C["accent"],
             selectbackground=C["accent_dim"],
@@ -1188,11 +1224,11 @@ class ChatApp:
             relief=tk.FLAT, bd=0,
             highlightthickness=0, undo=True,
             padx=12, pady=8)
-        self.ent.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10), ipady=2)
+        self.ent.pack(fill=tk.BOTH, expand=True, ipady=2)
         self.ent.bind("<Return>", self._on_return)
         self.ent.bind("<Shift-Return>", lambda e: None)
-        self.ent.bind("<FocusIn>", self._clrph)
-        self.ent.bind("<FocusOut>", self._rstph)
+        self.ent.bind("<FocusIn>", self._on_input_focus_in)
+        self.ent.bind("<FocusOut>", self._on_input_focus_out)
         # Command history
         self.ent.bind("<Up>", self._history_prev)
         self.ent.bind("<Down>", self._history_next)
@@ -1239,7 +1275,22 @@ class ChatApp:
         # Kiểm tra xem có đang ở cuối không
         _, bot = self.chat.text.yview()
         self._auto_scroll = (bot >= 0.99)
+        # Show/hide scroll-to-bottom button
+        if not self._auto_scroll and not self._scroll_btn_visible:
+            self._scroll_btn.place(relx=0.5, rely=1.0, anchor="s", y=-12)
+            self._scroll_btn_visible = True
+        elif self._auto_scroll and self._scroll_btn_visible:
+            self._scroll_btn.place_forget()
+            self._scroll_btn_visible = False
         return "break"
+
+    def _scroll_to_bottom(self):
+        """Scroll chat xuống cuối và bật lại auto-scroll."""
+        self._auto_scroll = True
+        self.chat.see(tk.END)
+        if self._scroll_btn_visible:
+            self._scroll_btn.place_forget()
+            self._scroll_btn_visible = False
 
     def _setph(self):
         self._ph = True
@@ -1256,6 +1307,16 @@ class ChatApp:
     def _rstph(self, e=None):
         if not self.ent.get("1.0", tk.END).strip():
             self._setph()
+
+    def _on_input_focus_in(self, e=None):
+        """Input focus — highlight border + clear placeholder."""
+        self._input_wrapper.configure(highlightbackground=C["accent"], highlightcolor=C["accent"])
+        self._clrph(e)
+
+    def _on_input_focus_out(self, e=None):
+        """Input blur — dim border + restore placeholder."""
+        self._input_wrapper.configure(highlightbackground=C["border"], highlightcolor=C["border"])
+        self._rstph(e)
 
     def _get_input(self):
         if self._ph:
@@ -1300,82 +1361,49 @@ class ChatApp:
         ctx = get_run_context()
         user = current_username()
 
-        # === Header ===
+        # === Header compact ===
         self._w("WICA", "title")
-        self._w(f"  Windows Install CLI Agent  ·  v{BUILD_VERSION}\n", "info")
-
+        self._w(f"  v{BUILD_VERSION}  ·  ", "info")
         if self.agent.client:
-            self._w(f"  [ok] {self.agent.provider_name} ({self.agent.model})\n", "ok")
+            self._w(f"{self.agent.provider_name}", "ok")
         else:
-            self._w(f"  [x] Chưa kết nối LLM — bấm ⚙️ Cài đặt\n", "fail")
+            self._w("LLM offline", "fail")
+        self._w("  ·  ", "info")
         if ctx == "admin":
-            self._w(f"  [ok] Admin: {user} — áp dụng toàn máy\n", "ok")
+            self._w(f"Admin: {user}\n", "ok")
         elif ctx == "different_user":
-            self._w(f"  [~] Run-as: {user} — áp dụng toàn máy\n", "warn")
+            self._w(f"Run-as: {user}\n", "warn")
         else:
-            self._w(f"  [i] User: {user} — chạy Admin để áp dụng toàn máy\n", "info")
+            self._w(f"User: {user}\n", "info")
 
-        # SoftVN copy status — chỉ hiện nếu đã xong trước khi UI kịp poll
+        # SoftVN copy status
         status = getattr(self.agent, '_softvn_copy_status', 'pending')
-        if status == "up_to_date":
-            self._w(f"  [ok] SoftVN đã up-to-date\n", "ok")
-        elif status == "permission_denied":
-            self._w(f"  [x] Không sync được SoftVN — cần quyền Admin\n", "warn")
+        if status == "permission_denied":
+            self._w("  [x] SoftVN sync cần quyền Admin\n", "warn")
 
         self._w("─" * 48 + "\n", "divider")
 
-        # === Profile ===
-        self._w("  Profile\n", "title")
-        self._w("    cài máy mới", "cmd_inline")
-        self._w("  chạy toàn bộ: bloatware, config, winget, fonts, deploy, agent\n", "label")
-        self._w("    cài phần mềm thuế", "cmd_inline")
-        self._w("  HTKK + iTaxViewer + CT SigningHub (bản thường)\n", "label")
-        self._w("    cài phần mềm thuế dll", "cmd_inline")
-        self._w("  bản DLL — dữ liệu lớn\n", "label")
+        # === Quick reference — compact 2-column style ===
+        self._w("  Profile  ", "title")
+        self._w("cài máy mới  ·  cài phần mềm thuế  ·  cài phần mềm thuế dll\n", "cmd_inline")
 
-        # === Cài / Gỡ ===
-        self._w("\n  Cài / Gỡ phần mềm\n", "title")
-        install_cmds = ["cài chrome, 7zip, acrobat", "gỡ teamviewer",
-                         "cập nhật tất cả", "gỡ bloatware"]
-        self._w("  " + "  ·  ".join(install_cmds) + "\n", "cmd_inline")
+        self._w("  Cài / Gỡ  ", "title")
+        self._w("cài chrome, 7zip  ·  gỡ teamviewer  ·  cập nhật tất cả  ·  gỡ bloatware\n", "cmd_inline")
 
-        # === PM Thuế ===
-        self._w("\n  Phần mềm Thuế", "title")
-        self._w("  cài riêng từng app từ SoftVN\\PMThue\n", "label")
-        tax_cmds = ["cài htkk", "cài itaxviewer", "cài signinghub",
-                     "htkk dll", "itaxviewer dll"]
-        self._w("  " + "  ·  ".join(tax_cmds) + "\n", "cmd_inline")
+        self._w("  Deploy    ", "title")
+        self._w("unikey  ·  teamviewer qs  ·  cài font vni  ·  copy profile vpn\n", "cmd_inline")
 
-        # === Deploy & Tools ===
-        self._w("\n  Deploy & Tools", "title")
-        self._w("  copy portable app, font, VPN profile\n", "label")
-        deploy_cmds = ["unikey", "teamviewer qs", "cài font vni",
-                         "copy profile vpn"]
-        self._w("  " + "  ·  ".join(deploy_cmds) + "\n", "cmd_inline")
+        self._w("  Config    ", "title")
+        self._w("dark mode  ·  hiện đuôi file  ·  taskbar trái  ·  tắt copilot  ·  tắt uac\n", "cmd_inline")
 
-        # === Cấu hình hệ thống ===
-        self._w("\n  Cấu hình hệ thống\n", "title")
-        sys_cmds = ["bật dark mode", "đổi tên máy ABC", "hiện đuôi file",
-                     "taskbar trái", "tắt copilot", "menu cổ điển",
-                     "tắt uac"]
-        self._w("  " + "  ·  ".join(sys_cmds) + "\n", "cmd_inline")
+        self._w("  LLM       ", "title")
+        self._w("mạng chậm  ·  máy lag  ·  lỗi update  ·  mô tả vấn đề bằng tiếng Việt\n", "cmd_inline")
 
-        # === LLM hỗ trợ ===
-        self._w("\n  LLM hỗ trợ", "title")
-        self._w("  mô tả vấn đề bằng tiếng Việt, AI tự chẩn đoán và xử lý\n", "label")
-        llm_cmds = ["mạng chậm / mất mạng", "máy lag, chậm",
-                     "lỗi Windows Update", "cài máy in, VPN..."]
-        self._w("  " + "  ·  ".join(llm_cmds) + "\n", "cmd_inline")
-
-        # === CLI trực tiếp ===
-        self._w("\n  CLI", "title")
-        self._w("  gõ trực tiếp lệnh Windows, kết quả hiện ngay trong chat\n", "label")
-        cli_cmds = ["ipconfig /all", "ping 8.8.8.8", "tasklist",
-                     "netstat -an", "systeminfo"]
-        self._w("  " + "  ·  ".join(cli_cmds) + "\n", "cmd_inline")
+        self._w("  CLI       ", "title")
+        self._w("ipconfig /all  ·  ping 8.8.8.8  ·  tasklist  ·  systeminfo\n", "cmd_inline")
 
         self._w("\n", "info")
-        self._w("  Kéo file .exe/.msi vào chat để cài  ·  ↑↓ lệnh cũ  ·  Ctrl+L xoá\n", "hint")
+        self._w("  Kéo file vào chat để cài  ·  ↑↓ lệnh cũ  ·  Tab autocomplete  ·  Ctrl+L xoá\n", "hint")
         self._w("─" * 48 + "\n", "divider")
 
     def _w(self, t, tag):
@@ -1389,12 +1417,21 @@ class ChatApp:
         self.chat.configure(state=tk.DISABLED)
         if self._auto_scroll:
             self.chat.see(tk.END)
+            # Hide scroll-to-bottom button khi auto-scroll đang bật
+            if self._scroll_btn_visible:
+                self._scroll_btn.place_forget()
+                self._scroll_btn_visible = False
 
     def _out(self, t, tag="result"):
         clean = EMO.sub("", t).strip()
         for line in clean.split("\n"):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            # CLI output: highlight header/separator lines (dòng chứa toàn --- hoặc ===)
+            if tag == "cmd" and re.match(r'^[\-=]{4,}', line):
+                self._w("  " + line + "\n", "cli_header")
+            else:
                 self._w("  " + line + "\n", tag)
 
     def _out_s(self, t, tag="result"):
@@ -1413,11 +1450,13 @@ class ChatApp:
         if on:
             self._cancelled = False
             self._auto_scroll = True  # Reset auto-scroll khi bắt đầu task mới
-            self.ent.configure(state=tk.DISABLED)
+            self.ent.configure(state=tk.DISABLED, bg="#252535")
+            self._input_wrapper.configure(highlightbackground="#45475a", highlightcolor="#45475a")
             self.btn_send.pack_forget()
             self.btn_stop.pack(side=tk.LEFT)
         else:
-            self.ent.configure(state=tk.NORMAL)
+            self.ent.configure(state=tk.NORMAL, bg=C["bg_input"])
+            self._input_wrapper.configure(highlightbackground=C["border"], highlightcolor=C["border"])
             self.ent.focus_set()
             # Re-kích hoạt IME sau khi enable lại Entry
             self.root.after(50, self._init_ime)
@@ -1434,8 +1473,25 @@ class ChatApp:
         SettingsDialog(self.root, self)
 
     def _clear(self):
+        # Lưu nội dung cũ vào buffer để Ctrl+Z undo
+        self._chat_backup = self.chat.text.get("1.0", tk.END)
         self.chat.clear()
         self._welcome()
+        # Hide scroll-to-bottom button nếu đang hiện
+        if self._scroll_btn_visible:
+            self._scroll_btn.place_forget()
+            self._scroll_btn_visible = False
+
+    def _undo_clear(self, e=None):
+        """Ctrl+Z — khôi phục chat sau khi clear. Chỉ hoạt động 1 lần."""
+        if not self._chat_backup or self._is_busy():
+            return
+        self.chat.text.configure(state=tk.NORMAL)
+        self.chat.text.delete("1.0", tk.END)
+        self.chat.text.insert("1.0", self._chat_backup)
+        self.chat.text.configure(state=tk.DISABLED)
+        self.chat.see(tk.END)
+        self._chat_backup = None
 
     def _send(self):
         t = self._get_input()
@@ -1451,7 +1507,8 @@ class ChatApp:
         self.ent.configure(fg=C["text"])
         if os.path.isfile(t.strip('"').strip("'")):
             self._dropf(t.strip('"').strip("'")); return
-        self._w("  > ", "info"); self._w(t+"\n", "user")
+        ts = time.strftime("%H:%M")
+        self._w(f"  {ts}  > ", "ts"); self._w(t+"\n", "user")
         self._busy(True)
         threading.Thread(target=self._exec, args=(t,), daemon=True).start()
 

@@ -58,6 +58,15 @@ aliases:
   obs: "OBSProject.OBSStudio"
   gimp: "GIMP.GIMP"
   libreoffice: "TheDocumentFoundation.LibreOffice"
+  ollama: "Ollama.Ollama"
+  cursor: "Anysphere.Cursor"
+  "visual studio code": "Microsoft.VisualStudio.Code"
+  docker: "Docker.DockerDesktop"
+  postman: "Postman.Postman"
+  slack: "SlackTechnologies.Slack"
+  discord: "Discord.Discord"
+  spotify: "Spotify.Spotify"
+  notion: "Notion.Notion"
   # --- App trong profile mac_dinh ---
   acrobat: "Adobe.Acrobat.Reader.64-bit"
   "acrobat reader": "Adobe.Acrobat.Reader.64-bit"
@@ -143,6 +152,7 @@ profiles:
       # === BƯỚC 1: Chuẩn bị hệ thống ===
       - {type: system_config, config: uac_off}
       - {type: remove_bloatware}
+      - {type: clean_start_menu}
       # === BƯỚC 2: Cấu hình hệ thống (all users) ===
       - {type: system_config, config: timezone_SE_Asia_Standard_Time}
       - {type: system_config, config: date_dmy}
@@ -248,6 +258,20 @@ quick_commands:
     action: {type: install_tax, path: "PMThue\\iTaxViewer.zip", shortcut: "iTaxViewer"}
   "itax viewer":
     action: {type: install_tax, path: "PMThue\\iTaxViewer.zip", shortcut: "iTaxViewer"}
+  # --- Gỡ phần mềm Thuế ---
+  "gỡ htkk":
+    action: {type: uninstall, package: "htkk"}
+  "gỡ phần mềm htkk":
+    action: {type: uninstall, package: "htkk"}
+  "gỡ itaxviewer":
+    action: {type: uninstall, package: "itaxviewer"}
+  "gỡ itax viewer":
+    action: {type: uninstall, package: "itaxviewer"}
+  "gỡ signinghub":
+    action: {type: uninstall, package: "signinghub"}
+  "gỡ ct signinghub":
+    action: {type: uninstall, package: "ct signinghub"}
+  # --- Profile Thuế ---
   "cài phần mềm thuế":
     action: {type: run_profile, name: "thue"}
   "phần mềm thuế dll":
@@ -259,6 +283,15 @@ quick_commands:
     action: {type: remove_bloatware}
   "bloatware":
     action: {type: remove_bloatware}
+  # --- Dọn Start Menu ---
+  "dọn start menu":
+    action: {type: clean_start_menu}
+  "clean start menu":
+    action: {type: clean_start_menu}
+  "xóa icon rác":
+    action: {type: clean_start_menu}
+  "dọn icon quảng cáo":
+    action: {type: clean_start_menu}
   # --- Cấu hình taskbar ---
   "tắt task view":
     action: {type: system_config, config: disable_task_view}

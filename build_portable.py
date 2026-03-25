@@ -12,7 +12,6 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import subprocess
 import shutil
 import os
-import sys
 
 import time
 DIST_DIR = "dist"

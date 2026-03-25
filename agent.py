@@ -6,11 +6,17 @@ Lệnh phức tạp/mơ hồ -> mới gọi LLM.
 """
 import json
 import sys
+import time
 import yaml
 import os
 import threading
 from openai import OpenAI
-from tools import SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit, create_shortcut, create_shortcut_admin, deploy_portable, set_progress_callback, _run_cli_command, copy_to_all_users, install_fonts, _is_winget_installed, _is_registry_set, _is_deployed, _are_fonts_installed, _is_copied_to_users, _get_installed_list
+from tools import (SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit,
+                   create_shortcut, create_shortcut_admin, deploy_portable,
+                   set_progress_callback, _run_cli_command, copy_to_all_users,
+                   install_fonts, _is_winget_installed, _is_registry_set,
+                   _is_deployed, _are_fonts_installed, _is_copied_to_users,
+                   _get_installed_list_cached, clean_start_menu, _is_start_menu_clean)
 from fast_commands import parse_fast
 from privilege import is_elevated
 from keystore import get_key
@@ -58,6 +64,7 @@ Khi hoàn thành hoặc không cần thêm actions:
 {{ "type": "copy_to_all_users", "source": "file", "dest_relative": "path" }}
 {{ "type": "install_fonts", "source": "thư_mục" }}
 {{ "type": "remove_bloatware" }}
+{{ "type": "clean_start_menu" }}
 {{ "type": "run_profile", "name": "mac_dinh" }}
 {{ "type": "cli", "command": "lệnh" }}
 
@@ -145,10 +152,14 @@ QUICK COMMANDS: {quick_commands}
 PROFILES: {profiles}
 THÔNG TIN MÁY: {system_context}
 FILE/FOLDER CÓ SẴN TRONG LOCAL_PATHS (dùng ĐÚNG tên này cho install_fonts, deploy_portable, install_local, copy_to_all_users):
+```
 {local_files}
+```
 
 PHẦN MỀM ĐÃ CÀI — PATH THỰC TẾ (dùng cho deploy_portable, create_shortcut, run_profile):
+```
 {discovered_tools}
+```
 
 ## QUY TẮC CHUNG
 - Trả lời tiếng Việt có dấu
@@ -160,6 +171,8 @@ PHẦN MỀM ĐÃ CÀI — PATH THỰC TẾ (dùng cho deploy_portable, create_s
 
 class AntiGravityAgent:
     def __init__(self):
+        # Lock cho local_paths mutation (shared giữa main thread và bg threads)
+        self._local_paths_lock = threading.Lock()
         # try/except cho config load
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -167,6 +180,13 @@ class AntiGravityAgent:
         except Exception as e:
             _audit("CONFIG_LOAD", f"error: {e}", "FAIL")
             self.config = {}
+        # Validate config cơ bản
+        if not isinstance(self.config.get("aliases"), dict):
+            self.config["aliases"] = {}
+            _audit("CONFIG_VALIDATE", "aliases missing or invalid, using empty", "WARN")
+        if not isinstance(self.config.get("llm_providers"), list):
+            self.config["llm_providers"] = []
+            _audit("CONFIG_VALIDATE", "llm_providers missing or invalid", "WARN")
         self.aliases = self.config.get("aliases", {})
         self.providers = self.config.get("llm_providers", [])
         self.local_paths = self.config.get("local_paths", [])
@@ -174,13 +194,9 @@ class AntiGravityAgent:
         self._softvn_copy_status = "pending"
         self._softvn_copy_cb = None  # callback để notify UI khi xong
         threading.Thread(target=self._auto_copy_softvn_bg, daemon=True).start()
-        # Tự động phát hiện path UniKey, TeamViewer QS từ registry
-        # và thêm vào local_paths nếu chưa có
-        self._discovered_tools = self._discover_installed_tools()
-        for tool_path in self._discovered_tools.values():
-            folder = os.path.dirname(tool_path)
-            if folder and folder not in self.local_paths and os.path.isdir(folder):
-                self.local_paths.append(folder)
+        # Tự động phát hiện path UniKey, TeamViewer QS từ registry (background)
+        self._discovered_tools = {}
+        threading.Thread(target=self._discover_tools_bg, daemon=True).start()
         self.client = None
         self.model = None
         self.provider_name = None
@@ -251,8 +267,9 @@ class AntiGravityAgent:
         src = next((p for p in candidates if os.path.isdir(p)), None)
 
         dest = r"C:\SoftVN"
-        if dest not in self.local_paths:
-            self.local_paths.append(dest)
+        with self._local_paths_lock:
+            if dest not in self.local_paths:
+                self.local_paths.append(dest)
 
         if src is None:
             _audit("AUTO_COPY_SOFTVN", "SoftVN not found near app", "WARN")
@@ -323,8 +340,9 @@ class AntiGravityAgent:
         ]
         src = next((p for p in candidates if os.path.isdir(p)), None)
         dest = r"C:\SoftVN"
-        if dest not in self.local_paths:
-            self.local_paths.append(dest)
+        with self._local_paths_lock:
+            if dest not in self.local_paths:
+                self.local_paths.append(dest)
 
         if src is None:
             _audit("AUTO_COPY_SOFTVN", "SoftVN not found near app", "WARN")
@@ -385,50 +403,64 @@ class AntiGravityAgent:
     def _scan_local_paths(local_paths: list[str], max_depth: int = 2) -> str:
         """Scan cấu trúc thư mục local_paths để LLM biết tên file/folder thực tế.
 
-        Trả về dạng tree text, ví dụ:
-          F:\\SoftVN\\
-            Fonts\\          (folder)
-            Chrome.exe       (file)
-            Office\\         (folder)
-              setup.exe      (file)
-
-        Giới hạn depth=2 để tránh output quá dài.
+        Giới hạn depth=2 và output tối đa 2000 chars để tránh prompt quá dài.
         EDR-safe: chỉ dùng os.scandir (Python stdlib).
         """
         if not local_paths:
             return "(chưa cấu hình local_paths trong config.yaml)"
 
+        MAX_OUTPUT_CHARS = 2000
         lines = []
+        total_chars = 0
+        truncated = False
         font_exts = {".ttf", ".otf", ".ttc"}
         installer_exts = {".exe", ".msi", ".msix", ".msixbundle", ".appx", ".zip", ".rar"}
 
         def _scan(path: str, indent: int, depth: int):
-            if depth < 0:
+            nonlocal total_chars, truncated
+            if depth < 0 or truncated:
                 return
             try:
                 entries = sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name.lower()))
                 for entry in entries:
+                    if truncated:
+                        return
                     if entry.name.startswith("."):
                         continue
                     prefix = "  " * indent
                     if entry.is_dir():
-                        lines.append(f"{prefix}{entry.name}\\  (folder)")
+                        line = f"{prefix}{entry.name}\\  (folder)"
+                        total_chars += len(line) + 1
+                        if total_chars > MAX_OUTPUT_CHARS:
+                            truncated = True
+                            return
+                        lines.append(line)
                         _scan(entry.path, indent + 1, depth - 1)
                     else:
                         ext = os.path.splitext(entry.name)[1].lower()
                         if ext in font_exts or ext in installer_exts:
-                            lines.append(f"{prefix}{entry.name}")
+                            line = f"{prefix}{entry.name}"
+                            total_chars += len(line) + 1
+                            if total_chars > MAX_OUTPUT_CHARS:
+                                truncated = True
+                                return
+                            lines.append(line)
             except PermissionError:
                 pass
 
         for base in local_paths:
+            if truncated:
+                break
             if not os.path.isdir(base):
                 lines.append(f"{base}  (không tồn tại)")
                 continue
             lines.append(f"{base}\\")
             _scan(base, indent=1, depth=max_depth - 1)
 
-        return "\n".join(lines) if lines else "(local_paths trống hoặc không có file)"
+        result = "\n".join(lines) if lines else "(local_paths trống hoặc không có file)"
+        if truncated:
+            result += "\n... (danh sách đã rút gọn)"
+        return result
 
     @staticmethod
     def _discover_installed_tools() -> dict[str, str]:
@@ -536,6 +568,16 @@ class AntiGravityAgent:
 
         return results
 
+    def _discover_tools_bg(self):
+        """Chạy _discover_installed_tools trong background thread."""
+        tools = self._discover_installed_tools()
+        self._discovered_tools = tools
+        with self._local_paths_lock:
+            for tool_path in tools.values():
+                folder = os.path.dirname(tool_path)
+                if folder and folder not in self.local_paths and os.path.isdir(folder):
+                    self.local_paths.append(folder)
+
     @staticmethod
     def _format_discovered_tools(tools: dict[str, str]) -> str:
         """Format discovered tools thành text cho SYSTEM_PROMPT."""
@@ -610,20 +652,28 @@ class AntiGravityAgent:
             if not api_key and name != "ollama":
                 continue
             try:
-                client = OpenAI(base_url=base_url, api_key=api_key or "ollama")
-                # timeout 5s cho health check
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": "hi"}],
-                    max_tokens=5, temperature=0,
-                    timeout=5,
-                )
-                if resp.choices:
-                    self.client = client
-                    self.model = model
-                    self.provider_name = name
-                    _audit("LLM_CONNECT", f"provider={name} model={model}", "OK")
-                    return
+                client = OpenAI(base_url=base_url, api_key=api_key or "ollama",
+                                timeout=5)
+                # Lightweight health check: list models thay vì tạo completion thật
+                # Tiết kiệm quota API, nhanh hơn
+                try:
+                    client.models.list()
+                except Exception:
+                    # Fallback: một số provider không hỗ trợ /models endpoint
+                    # Gọi completion tối thiểu (1 token)
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": "ok"}],
+                        max_tokens=1, temperature=0,
+                        timeout=5,
+                    )
+                    if not resp.choices:
+                        raise ConnectionError("no response")
+                self.client = client
+                self.model = model
+                self.provider_name = name
+                _audit("LLM_CONNECT", f"provider={name} model={model}", "OK")
+                return
             except Exception:
                 _audit("LLM_CONNECT", f"provider={name} failed", "FAIL")
                 continue
@@ -820,7 +870,11 @@ class AntiGravityAgent:
         return ""
 
     def _is_safe_path(self, path: str) -> bool:
-        """Kiểm tra path nằm trong local_paths hoặc app directory cho phép (chống path traversal)."""
+        """Kiểm tra path nằm trong local_paths hoặc app directory cho phép.
+
+        Chống path traversal + symlink/junction bypass.
+        EDR-safe: chỉ dùng os (Python stdlib).
+        """
         app_dir = os.path.dirname(os.path.abspath(__file__))
         if getattr(sys, 'frozen', False):
             app_dir = os.path.dirname(sys.executable)
@@ -828,8 +882,12 @@ class AntiGravityAgent:
         if not allowed:
             return False
         real = os.path.realpath(path)
+        # Chặn symlink/junction escape: nếu path là symlink mà target nằm ngoài allowed
+        if os.path.islink(path) or (os.path.exists(path) and real != os.path.abspath(path)):
+            _audit("PATH_BLOCKED", f"symlink/junction detected: {path} -> {real}", "FAIL")
         for base in allowed:
-            if real.startswith(os.path.realpath(base) + os.sep) or real == os.path.realpath(base):
+            rb = os.path.realpath(base)
+            if real.startswith(rb + os.sep) or real == rb:
                 return True
         return False
 
@@ -909,6 +967,9 @@ class AntiGravityAgent:
             still_installed = [p for p in bloatware if _is_installed_via_registry(p)]
             if not still_installed:
                 return "đã gỡ hết"
+        elif t == "clean_start_menu":
+            if _is_start_menu_clean():
+                return "đã dọn rồi"
         elif t == "install_local":
             path_lower = action.get("path", "").lower()
             from tools import _is_installed_via_registry
@@ -937,7 +998,8 @@ class AntiGravityAgent:
         # === SMART SKIP — áp dụng toàn diện cho mọi flow ===
         skip_types = {"install", "uninstall", "system_config", "set_hostname",
                       "deploy_portable", "install_fonts", "copy_to_all_users",
-                      "remove_bloatware", "install_local", "install_htkk", "install_tax"}
+                      "remove_bloatware", "clean_start_menu", "install_local",
+                      "install_htkk", "install_tax"}
         if t in skip_types:
             skip_reason = self._check_skip(action)
             if skip_reason:
@@ -1012,6 +1074,8 @@ class AntiGravityAgent:
             return deploy_portable(source, dest, action.get("name", ""), action.get("exe", ""), action.get("desktop", "public"))
         elif t == "remove_bloatware":
             return self._remove_bloatware()
+        elif t == "clean_start_menu":
+            return clean_start_menu()
         elif t == "list_profiles":
             return self._list_profiles()
         elif t == "run_profile":
@@ -1108,6 +1172,8 @@ class AntiGravityAgent:
                               f"[...] Đang cài portable: {action.get('name', '')}..."),
             "remove_bloatware": ("Gỡ bloatware",
                                "[...] Đang gỡ bloatware..."),
+            "clean_start_menu": ("Dọn Start Menu",
+                                "[...] Đang dọn Start Menu..."),
             "upgrade_all": ("Cập nhật tất cả phần mềm",
                           "[...] Đang cập nhật tất cả phần mềm..."),
             "export_apps": ("Xuất danh sách phần mềm",
@@ -1182,7 +1248,7 @@ class AntiGravityAgent:
         actions = profile.get("actions", [])
         _audit("PROFILE", f"name={pname} steps={len(actions)}", "OK")
         # Cảnh báo nếu cần admin mà chưa elevated
-        needs_admin = any(a.get("type") in ("system_config", "remove_bloatware") for a in actions)
+        needs_admin = any(a.get("type") in ("system_config", "remove_bloatware", "clean_start_menu") for a in actions)
         if needs_admin and not is_elevated():
             on_output(f"[warn] Profile '{pname}' cần quyền Admin để cấu hình hệ thống.", "warn")
             on_output("  Gợi ý: Đóng app → Click phải → Run as Administrator", "warn")
@@ -1200,7 +1266,7 @@ class AntiGravityAgent:
             for idx, action in enumerate(actions):
                 # Delay nhỏ để UI kịp render từng bước (tránh dump hàng loạt)
                 if idx > 0:
-                    import time; time.sleep(1.0)
+                    time.sleep(1.0)
                 if self._cancelled:
                     on_output(f"[warn] Đã dừng sau {run_num} bước chạy", "warn")
                     break
@@ -1257,7 +1323,7 @@ class AntiGravityAgent:
                     on_output("[warn] Đã dừng retry.", "warn")
                     break
                 if i > 1:
-                    import time; time.sleep(1.0)
+                    time.sleep(1.0)
                 on_output(f"  [{i}/{len(failed_actions)}] {desc}", "progress")
                 result = self._execute_action(action)
                 if result:
@@ -1308,7 +1374,7 @@ class AntiGravityAgent:
         _audit("BLOATWARE", f"count={len(bloatware)}", "OK")
         # Lấy danh sách app đã cài MỘT LẦN (thay vì check từng app)
         on_output(f"[...] Đang kiểm tra {len(bloatware)} bloatware...", "progress")
-        installed_output = _get_installed_list()
+        installed_output = _get_installed_list_cached()
         ok = skip = fail = 0
         for i, pkg_id in enumerate(bloatware, 1):
             if self._cancelled:
@@ -1349,6 +1415,8 @@ class AntiGravityAgent:
             def _on_winget_line(line):
                 on_output(f"    {line}", "info")
             set_progress_callback(_on_winget_line)
+            has_failure = False
+            failure_context = []
             try:
                 # Thu thập kết quả CLI cho diagnostic
                 cli_results = []
@@ -1385,9 +1453,16 @@ class AntiGravityAgent:
                         on_output(desc, "progress")
                     result = self._execute_action(action)
                     if result:
-                        tag = "info" if "[skip]" in result else (
-                            "ok" if "[ok]" in result or "[info]" in result else (
-                            "fail" if "[error]" in result or "[loi]" in result else "result"))
+                        if "[error]" in result or "[loi]" in result:
+                            tag = "fail"
+                            has_failure = True
+                            failure_context.append(f"Action: {self._describe_action_short(action)}\nResult: {result}")
+                        elif "[skip]" in result:
+                            tag = "info"
+                        elif "[ok]" in result or "[info]" in result:
+                            tag = "ok"
+                        else:
+                            tag = "result"
                         on_output(result, tag)
             finally:
                 set_progress_callback(None)
@@ -1406,6 +1481,23 @@ class AntiGravityAgent:
                     "4. Trả lời JSON: {\"message\": \"...\", \"actions\": [...], \"done\": false/true}"
                 )
                 self._llm_agentic_loop(analysis_prompt, on_output, on_raise)
+                return
+
+            # === FAST PATH FAIL → LLM ESCALATION ===
+            # Khi action thất bại, escalate sang LLM để tự tìm cách fix
+            if has_failure and self.client and not self._cancelled:
+                on_output("[...] Đang tìm cách khắc phục...", "progress")
+                escalation_prompt = (
+                    f"User yêu cầu: \"{user_input}\"\n\n"
+                    "=== KẾT QUẢ THỰC THI (THẤT BẠI) ===\n" +
+                    "\n---\n".join(failure_context) +
+                    "\n\nHãy TÌM CÁCH KHÁC để hoàn thành yêu cầu của user:\n"
+                    "- Nếu install/uninstall fail → dùng action search để tìm đúng winget ID rồi thử lại\n"
+                    "- Nếu lệnh CLI fail → thử lệnh khác tương đương\n"
+                    "- Nếu không có cách nào → giải thích rõ lý do và gợi ý user\n"
+                    "Trả lời JSON: {\"message\": \"...\", \"actions\": [...], \"done\": false/true}"
+                )
+                self._llm_agentic_loop(escalation_prompt, on_output, on_raise)
             return
 
         # === LLM PATH ===
