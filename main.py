@@ -584,9 +584,13 @@ class SettingsDialog:
                 fg=C["ok"])
             self._status_label.configure(
                 text=f"Đã kết nối: {self.app.agent.provider_name}", fg=C["ok"])
+            # Cập nhật status bar chính
+            self.app._llm_status_label.configure(
+                text=f"LLM: {self.app.agent.provider_name}", fg=C["ok"])
         else:
             self._llm_status.configure(text="○ Không kết nối được", fg=C["fail"])
             self._status_label.configure(text="Không kết nối được LLM", fg=C["fail"])
+            self.app._llm_status_label.configure(text="LLM: chưa kết nối", fg=C["warn"])
 
     def _save(self):
         import yaml
@@ -894,6 +898,7 @@ class ChatApp:
         _dark_titlebar(self.root)
         self._build_status_bar()
         self._build_input()
+        self._build_chips()
         self._autocomplete = AutoComplete(self.ent, self.root)
         self._build_chat()
         self._welcome()
@@ -942,13 +947,14 @@ class ChatApp:
                  bg=C["bg_alt"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(10, 8), pady=2)
         # LLM status
         if self.agent.client:
-            llm_text = self.agent.provider_name
+            llm_text = f"LLM: {self.agent.provider_name}"
             llm_color = C["ok"]
         else:
-            llm_text = "Offline"
-            llm_color = C["fail"]
-        tk.Label(self._status_frame, text=llm_text, fg=llm_color,
-                 bg=C["bg_alt"], font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=8, pady=2)
+            llm_text = "LLM: chưa kết nối"
+            llm_color = C["warn"]
+        self._llm_status_label = tk.Label(self._status_frame, text=llm_text, fg=llm_color,
+                 bg=C["bg_alt"], font=("Segoe UI", 9))
+        self._llm_status_label.pack(side=tk.LEFT, padx=8, pady=2)
         # Version
         tk.Label(self._status_frame, text=f"v{BUILD_VERSION}", fg=C["text_dim"],
                  bg=C["bg_alt"], font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=(8, 10), pady=2)
@@ -1142,6 +1148,47 @@ class ChatApp:
         x = max(0, (sw - w) // 2)
         y = max(0, (sh - h) // 2)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _build_chips(self):
+        """Fast action chips — nút bấm nhanh cho thao tác thường dùng."""
+        # Chip definitions: (label, command_text)
+        # command_text sẽ được gửi vào chat như thể user gõ
+        chips = [
+            ("Cài máy mới", "cài máy mới"),
+            ("PM Thuế", "cài phần mềm thuế"),
+            ("Gỡ PM Thuế", "gỡ phần mềm thuế"),
+            ("Chrome", "cài chrome"),
+            ("UltraViewer", "cài ultraviewer"),
+            ("UniKey", "unikey"),
+            ("TeamViewer QS", "teamviewer qs"),
+            ("Gỡ Bloatware", "gỡ bloatware"),
+            ("Dark Mode", "dark mode"),
+            ("Thông tin máy", "thông tin máy"),
+        ]
+        # Separator
+        tk.Frame(self.root, bg="#313244", height=1).pack(fill=tk.X, side=tk.BOTTOM)
+        self._chips_frame = tk.Frame(self.root, bg=C["bg_alt"], padx=10, pady=6)
+        self._chips_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        for label, cmd in chips:
+            chip = tk.Label(
+                self._chips_frame, text=label,
+                font=("Segoe UI", 9), fg=C["text_dim"], bg="#313244",
+                padx=10, pady=3, cursor="hand2",
+            )
+            chip.pack(side=tk.LEFT, padx=3)
+            chip.bind("<Button-1>", lambda e, c=cmd: self._chip_exec(c))
+            chip.bind("<Enter>", lambda e, w=chip: w.configure(bg=C["accent_dim"], fg="#1e1e2e"))
+            chip.bind("<Leave>", lambda e, w=chip: w.configure(bg="#313244", fg=C["text_dim"]))
+
+    def _chip_exec(self, command: str):
+        """Thực thi command từ chip click — giống user gõ vào chat."""
+        if self._is_busy():
+            return
+        ts = time.strftime("%H:%M")
+        self._w(f"  {ts}  > ", "ts")
+        self._w(command + "\n", "user")
+        self._busy(True)
+        threading.Thread(target=self._exec, args=(command,), daemon=True).start()
 
     def _build_chat(self):
         # Chat container (for floating button overlay)
@@ -1469,6 +1516,14 @@ class ChatApp:
         self.agent.cancel()
         self._out("[Đã dừng]", "warn")
 
+    def _refresh_llm_status(self):
+        """Cập nhật LLM status trên status bar (gọi từ main thread)."""
+        if self.agent.client:
+            self._llm_status_label.configure(
+                text=f"LLM: {self.agent.provider_name}", fg=C["ok"])
+        else:
+            self._llm_status_label.configure(text="LLM: chưa kết nối", fg=C["warn"])
+
     def _open_settings(self):
         SettingsDialog(self.root, self)
 
@@ -1548,6 +1603,7 @@ class ChatApp:
         self.root.after(0, self._stop_spinner)
         self.root.after(0, self._w, "  "+"-"*52+"\n", "divider")
         self.root.after(0, self._busy, False)
+        self.root.after(0, self._refresh_llm_status)
         self.root.after(100, self._raise_window)
         # Notification sound khi hoàn thành
         if self._notify_sound:

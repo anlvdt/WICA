@@ -202,6 +202,13 @@ profiles:
       - {type: install_tax, path: "PMThue\\iTaxViewer_dll.zip", shortcut: "iTaxViewer"}
       - {type: install_tax, path: "PMThue\\CTSigningHub.rar", shortcut: "CT SigningHub"}
 
+  go_thue:
+    name: "Gỡ phần mềm Thuế"
+    actions:
+      - {type: uninstall, package: "htkk"}
+      - {type: uninstall, package: "itaxviewer"}
+      - {type: uninstall, package: "ct signinghub"}
+
 # === Quick Commands - Lệnh nhanh riêng lẻ ===
 # Gõ tên lệnh trong chat để chạy action tương ứng.
 # Không cần chạy cả profile, chỉ chạy 1 bước.
@@ -271,6 +278,15 @@ quick_commands:
     action: {type: uninstall, package: "signinghub"}
   "gỡ ct signinghub":
     action: {type: uninstall, package: "ct signinghub"}
+  # --- Gỡ TẤT CẢ phần mềm Thuế ---
+  "gỡ phần mềm thuế":
+    action: {type: run_profile, name: "go_thue"}
+  "gỡ pm thuế":
+    action: {type: run_profile, name: "go_thue"}
+  "gỡ tất cả phần mềm thuế":
+    action: {type: run_profile, name: "go_thue"}
+  "gỡ thuế":
+    action: {type: run_profile, name: "go_thue"}
   # --- Profile Thuế ---
   "cài phần mềm thuế":
     action: {type: run_profile, name: "thue"}
