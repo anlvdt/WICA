@@ -50,12 +50,90 @@ def _xor(data: bytes, salt: bytes) -> bytes:
     return bytes(d ^ salt[i % len(salt)] for i, d in enumerate(data))
 
 
-def save_keys(keys: dict[str, str]) -> str:
+import ctypes
+try:
+    from ctypes import wintypes
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+except ImportError:
+    pass
+
+
+def _encrypt_dpapi(data: bytes) -> bytes or None:
+    """Mã hóa bằng Windows DPAPI (CryptProtectData)."""
+    try:
+        if os.name != 'nt':
+            return None
+        in_blob = DATA_BLOB()
+        in_blob.cbData = len(data)
+        in_blob.pbData = ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_ubyte))
+        
+        out_blob = DATA_BLOB()
+        
+        res = ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(in_blob),
+            None,
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out_blob)
+        )
+        if not res:
+            return None
+        
+        encrypted = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return encrypted
+    except Exception:
+        return None
+
+
+def _decrypt_dpapi(data: bytes) -> bytes or None:
+    """Giải mã bằng Windows DPAPI (CryptUnprotectData)."""
+    try:
+        if os.name != 'nt':
+            return None
+        in_blob = DATA_BLOB()
+        in_blob.cbData = len(data)
+        in_blob.pbData = ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_ubyte))
+        
+        out_blob = DATA_BLOB()
+        
+        res = ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),
+            None,
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out_blob)
+        )
+        if not res:
+            return None
+            
+        decrypted = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return decrypted
+    except Exception:
+        return None
+
+
+def save_keys(keys: dict[str, str], force_xor: bool = False) -> str:
     """Mã hóa và lưu dict {tên: giá_trị} vào file .keys."""
     raw = json.dumps(keys, ensure_ascii=False).encode("utf-8")
-    encrypted = base64.b64encode(_xor(raw, _SALT))
+    
+    if not force_xor:
+        dpapi_enc = _encrypt_dpapi(raw)
+        if dpapi_enc:
+            content = b"DPAPI:" + base64.b64encode(dpapi_enc)
+            with open(_KEYFILE, "wb") as f:
+                f.write(content)
+            return _KEYFILE
+            
+    content = b"XOR:" + base64.b64encode(_xor(raw, _SALT))
     with open(_KEYFILE, "wb") as f:
-        f.write(encrypted)
+        f.write(content)
     return _KEYFILE
 
 
@@ -65,8 +143,22 @@ def load_keys() -> dict[str, str]:
         return {}
     try:
         with open(_KEYFILE, "rb") as f:
-            encrypted = f.read()
-        raw = _xor(base64.b64decode(encrypted), _SALT)
+            content = f.read().strip()
+        
+        if content.startswith(b"DPAPI:"):
+            raw_b64 = content[6:]
+            dpapi_data = base64.b64decode(raw_b64)
+            decrypted = _decrypt_dpapi(dpapi_data)
+            if decrypted:
+                return json.loads(decrypted.decode("utf-8"))
+            return {}
+        
+        if content.startswith(b"XOR:"):
+            raw_b64 = content[4:]
+        else:
+            raw_b64 = content
+            
+        raw = _xor(base64.b64decode(raw_b64), _SALT)
         return json.loads(raw.decode("utf-8"))
     except Exception:
         return {}

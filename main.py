@@ -48,6 +48,21 @@ def _dark_titlebar(root):
     except Exception:
         pass  # Dark titlebar not critical
 
+def _get_dpi_scale(root) -> float:
+    """Dò tìm tỉ lệ DPI của màn hình để scale UI chính xác."""
+    try:
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        if not hwnd:
+            hwnd = root.winfo_id()
+        # Windows 10 build 14393+ / Windows 11
+        dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+        return dpi / 96.0
+    except Exception:
+        try:
+            return float(root.tk.call('tk', 'scaling')) / 1.3333333333333333
+        except Exception:
+            return 1.0
+
 def _enable_ime_for_hwnd(hwnd: int):
     """Kích hoạt IME cho HWND — hoạt động cả khi Run as Admin.
 
@@ -268,6 +283,11 @@ class DarkScroll(tk.Frame):
     SB_MIN_THUMB = 35
 
     def __init__(self, parent, **kw):
+        scale = _get_dpi_scale(parent.winfo_toplevel())
+        self.SB_W = int(10 * scale)
+        self.SB_W_HOV = int(14 * scale)
+        self.SB_MIN_THUMB = int(35 * scale)
+
         super().__init__(parent, bg=C["bg"], bd=0, highlightthickness=0)
         self._sb = tk.Canvas(self, width=self.SB_W, bg=C["bg"], bd=0,
                              highlightthickness=0, relief=tk.FLAT)
@@ -277,24 +297,34 @@ class DarkScroll(tk.Frame):
         self.text.configure(yscrollcommand=self._sync)
         self._top = 0.0; self._bot = 1.0
         self._drg = False; self._dy = 0; self._dt = 0.0; self._hov = False
+        self._draw_pending = False
         self._sb.bind("<Button-1>", self._press)
         self._sb.bind("<B1-Motion>", self._move)
         self._sb.bind("<ButtonRelease-1>", self._rel)
-        self._sb.bind("<Configure>", lambda e: self._draw())
+        self._sb.bind("<Configure>", lambda e: self._request_draw())
         self._sb.bind("<Enter>", lambda e: self._sh(True))
         self._sb.bind("<Leave>", lambda e: self._sh(False))
         self.text.bind("<MouseWheel>", self._wh)
         # Robust delayed redraws to handle layout timing
         for ms in (100, 300, 600, 1000):
-            self.after(ms, self._draw)
+            self.after(ms, self._request_draw)
 
     def _sync(self, t, b):
         self._top, self._bot = float(t), float(b)
-        self._draw()
+        self._request_draw()
 
     def _sh(self, v):
         self._hov = v
         self._sb.configure(width=self.SB_W_HOV if v else self.SB_W)
+        self._request_draw()
+
+    def _request_draw(self):
+        if not self._draw_pending:
+            self._draw_pending = True
+            self.after_idle(self._execute_draw)
+
+    def _execute_draw(self):
+        self._draw_pending = False
         self._draw()
 
     def _draw(self):
@@ -321,7 +351,7 @@ class DarkScroll(tk.Frame):
         self._sb.create_oval(1, y2 - 2 * r, w - 1, y2, fill=c, outline=c, tags="t")
 
     def _press(self, e):
-        self._drg = True; self._dy = e.y; self._dt = self._top; self._draw()
+        self._drg = True; self._dy = e.y; self._dt = self._top; self._request_draw()
 
     def _move(self, e):
         if not self._drg: return
@@ -330,7 +360,7 @@ class DarkScroll(tk.Frame):
             self.text.yview_moveto(max(0, min(1.0, self._dt + (e.y - self._dy) / h)))
 
     def _rel(self, e):
-        self._drg = False; self._draw()
+        self._drg = False; self._request_draw()
 
     def _wh(self, e):
         self.text.yview_scroll(int(-1 * (e.delta / 120)), "units")
@@ -352,17 +382,20 @@ class SettingsDialog:
 
     def __init__(self, parent, app):
         self.app = app
+        scale = _get_dpi_scale(parent.winfo_toplevel())
+        w = int(self._W * scale)
+        h = int(self._H * scale)
         self.win = tk.Toplevel(parent)
         self.win.title("Cài đặt — WICA")
         self.win.configure(bg=C["bg"])
-        self.win.geometry(f"{self._W}x{self._H}")
+        self.win.geometry(f"{w}x{h}")
         self.win.resizable(False, False)
         self.win.transient(parent)
         self.win.grab_set()
         # Center on parent
         self.win.update_idletasks()
-        px = parent.winfo_x() + (parent.winfo_width() - self._W) // 2
-        py = parent.winfo_y() + (parent.winfo_height() - self._H) // 2
+        px = parent.winfo_x() + (parent.winfo_width() - w) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - h) // 2
         self.win.geometry(f"+{max(0,px)}+{max(0,py)}")
         _dark_titlebar(self.win)
 
@@ -782,12 +815,11 @@ class AutoComplete:
     def _resize(self):
         if not self.popup or not self.popup.winfo_exists():
             return
-        self.widget.update_idletasks()
-        # Position: trên ô input
+        scale = _get_dpi_scale(self.root)
         x = self.widget.winfo_rootx()
         w = self.widget.winfo_width()
-        item_h = 24
-        h = min(len(self._suggestions), self.MAX_SHOW) * item_h + 4
+        item_h = int(24 * scale)
+        h = min(len(self._suggestions), self.MAX_SHOW) * item_h + int(4 * scale)
         y = self.widget.winfo_rooty() - h - 2
         if y < 0:
             y = self.widget.winfo_rooty() + self.widget.winfo_height() + 2
@@ -862,7 +894,7 @@ class AutoComplete:
 class ChatApp:
     PH_TEXT = "Nhập lệnh... (vd: cài chrome, gỡ teamviewer)"
 
-    def __init__(self):
+    def __init__(self, auto_cmd=None):
         self.agent = AntiGravityAgent()
         self._ph = False
         self._cancelled = False
@@ -925,6 +957,9 @@ class ChatApp:
         # Auto-elevate UniKey nếu cần (chạy trong thread để không block UI)
         if is_elevated():
             threading.Thread(target=_ensure_unikey_elevated, daemon=True).start()
+        # Auto-run lệnh từ CLI (--run-profile / --cmd) — zero-touch deploy
+        if auto_cmd:
+            self.root.after(1500, self._auto_run, auto_cmd)
 
     def _build_status_bar(self):
         """Status bar phía dưới cùng — hiện quyền, LLM, version."""
@@ -1142,6 +1177,9 @@ class ChatApp:
         return str(self.ent.cget("state")) == "disabled"
 
     def _center_window(self, w, h):
+        scale = _get_dpi_scale(self.root)
+        w = int(w * scale)
+        h = int(h * scale)
         self.root.update_idletasks()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
@@ -1548,6 +1586,16 @@ class ChatApp:
         self.chat.see(tk.END)
         self._chat_backup = None
 
+    def _auto_run(self, t):
+        """Chạy lệnh truyền từ CLI như thể user gõ vào chat — dùng cho zero-touch deploy."""
+        if self._is_busy():
+            self.root.after(1000, self._auto_run, t)
+            return
+        ts = time.strftime("%H:%M")
+        self._w(f"  {ts}  > ", "ts"); self._w(t + "\n", "user")
+        self._busy(True)
+        threading.Thread(target=self._exec, args=(t,), daemon=True).start()
+
     def _send(self):
         t = self._get_input()
         if not t:
@@ -1662,5 +1710,14 @@ class ChatApp:
 
     def run(self): self.root.mainloop()
 
-def main(): ChatApp().run()
+def main():
+    # CLI: WICA.exe --run-profile mac_dinh  |  WICA.exe --cmd "cài chrome"
+    auto_cmd = None
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == "--run-profile" and i + 1 < len(args):
+            auto_cmd = f"chạy profile {args[i + 1]}"
+        elif a == "--cmd" and i + 1 < len(args):
+            auto_cmd = args[i + 1]
+    ChatApp(auto_cmd=auto_cmd).run()
 if __name__ == "__main__": main()

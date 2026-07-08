@@ -45,6 +45,27 @@ try:
 except ImportError:
     _HAS_WIN32COM = False
 
+import sys
+import locale
+
+def _get_system_encoding() -> str:
+    """Dò tìm encoding phù hợp của hệ thống."""
+    try:
+        if sys.stdout and sys.stdout.encoding:
+            return sys.stdout.encoding
+    except Exception:
+        pass
+    try:
+        enc = locale.getpreferredencoding(False)
+        if enc:
+            return enc
+    except Exception:
+        pass
+    return "utf-8"
+
+_SYSTEM_ENCODING = _get_system_encoding()
+
+
 # --- Audit Logger (with rotation + cleanup) ---
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -198,7 +219,7 @@ def _run_winget(args: list[str], timeout: int = WINGET_TIMEOUT) -> tuple[int, st
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            encoding="utf-8",
+            encoding=_SYSTEM_ENCODING,
             errors="replace",
             creationflags=CREATE_NO_WINDOW,
         )
@@ -273,7 +294,7 @@ def _run_winget_progress(args: list[str], timeout: int = WINGET_TIMEOUT) -> tupl
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            encoding="utf-8",
+            encoding=_SYSTEM_ENCODING,
             errors="replace",
             creationflags=CREATE_NO_WINDOW,
         )
@@ -1416,6 +1437,7 @@ class SoftwareManager:
         self.aliases = aliases
         self.local_paths = local_paths or []
         self._source_ready = False  # Flag: đã init source trong session này chưa
+        self._source_lock = threading.Lock()
 
     def _resolve(self, name: str) -> str:
         return self.aliases.get(name.lower().strip(), name)
@@ -1586,7 +1608,8 @@ class SoftwareManager:
             creationflags=CREATE_NO_WINDOW,
         )
         _emit("  Winget source sẵn sàng.")
-        self._source_ready = True
+        with self._source_lock:
+            self._source_ready = True
 
     # Các package dùng bootstrapper/ClickToRun — winget spawn child process
     # có console window riêng không thể ẩn. Ưu tiên local installer nếu có.
@@ -1775,10 +1798,13 @@ class SoftwareManager:
               or "failed when opening source" in output.lower()):
             # Source chưa sẵn sàng — reset + update rồi thử lại
             # Chỉ reset 1 lần mỗi session để tránh lặp lại
-            if not self._source_ready:
+            with self._source_lock:
+                should_ensure = not self._source_ready
+            if should_ensure:
                 _audit("INSTALL_RETRY", f"source error, resetting and retrying {pkg_id}")
                 self._ensure_source()
-                self._source_ready = True
+                with self._source_lock:
+                    self._source_ready = True
             else:
                 _audit("INSTALL_RETRY", f"source already reset this session, retrying {pkg_id}")
             # Retry KHÔNG dùng --source winget (để winget tự chọn source khả dụng)
@@ -3520,7 +3546,7 @@ def _run_cli_command(command_str: str, timeout: int = CLI_TIMEOUT) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            encoding="utf-8",
+            encoding=_SYSTEM_ENCODING,
             errors="replace",
             creationflags=CREATE_NO_WINDOW,
         )
@@ -3579,3 +3605,180 @@ def _run_cli_command(command_str: str, timeout: int = CLI_TIMEOUT) -> str:
     except Exception as e:
         _audit("CLI_RESULT", str(e), "FAIL")
         return f"[error] Lỗi chạy lệnh: {e}"
+
+
+# --- WiFi Driver Fixer (ThinkPad T14 & tương tự) ---
+# Intel (VEN_8086): T14 Intel — AX201/AX211 (Netwtw08/Netwtw6e)
+# Qualcomm (VEN_17CB): T14 AMD Gen 3/4 — NFA725A
+# Realtek (VEN_10EC) / MediaTek (VEN_14C3): T14 AMD một số cấu hình
+_WIFI_VENDOR_MAP = {
+    "8086": "Intel (AX201/AX211 - Netwtw*.inf)",
+    "17CB": "Qualcomm (NFA725A - T14 AMD Gen 3/4, Lenovo DS556215)",
+    "10EC": "Realtek (RTL88xx)",
+    "14C3": "MediaTek (MT79xx)",
+}
+
+_DRIVER_SEARCH_DIRS = [
+    "C:\\SoftVN\\Drivers", "C:\\Drivers", "C:\\Tools\\Drivers",
+]
+
+
+def _driver_source_dirs() -> list[str]:
+    """Liệt kê các thư mục driver tồn tại: X:\\Drivers trên mọi ổ + local paths."""
+    dirs = []
+    for letter in "DEFGHIJKLMNOP":
+        d = f"{letter}:\\Drivers"
+        if os.path.isdir(d):
+            dirs.append(d)
+    for d in _DRIVER_SEARCH_DIRS:
+        if os.path.isdir(d) and d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _run_pnputil(args: list[str], timeout: int = 600) -> tuple[int, str]:
+    """Chạy pnputil.exe trực tiếp — EDR-safe, không shell."""
+    try:
+        proc = subprocess.Popen(
+            ["pnputil.exe"] + args,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out or ""
+    except FileNotFoundError:
+        return -1, "[error] Không tìm thấy pnputil.exe"
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return -1, "[error] pnputil chạy quá lâu"
+    except Exception as e:
+        return -1, f"[error] {e}"
+
+
+def _enum_problem_net_devices() -> list[dict]:
+    """Tìm thiết bị mạng/không rõ đang lỗi driver qua WMI (không subprocess).
+
+    Trả về list {name, hwid, vendor_hint} cho thiết bị có
+    ConfigManagerErrorCode != 0 (code 28 = chưa có driver).
+    """
+    devices = []
+    try:
+        import win32com.client
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            wmi = win32com.client.GetObject("winmgmts:\\\\.\\root\\cimv2")
+            query = ("SELECT Name, HardwareID, PNPClass, ConfigManagerErrorCode "
+                     "FROM Win32_PnPEntity WHERE ConfigManagerErrorCode <> 0")
+            for dev in wmi.ExecQuery(query):
+                hwids = list(dev.HardwareID) if dev.HardwareID else []
+                hwid = hwids[0] if hwids else ""
+                pnp_class = (dev.PNPClass or "").lower()
+                name = dev.Name or "Unknown device"
+                # Chỉ quan tâm: class Net, hoặc chưa nhận class (thiếu driver)
+                if pnp_class not in ("net", ""):
+                    continue
+                vendor_hint = ""
+                m = re.search(r"VEN_([0-9A-Fa-f]{4})", hwid)
+                if m:
+                    vendor_hint = _WIFI_VENDOR_MAP.get(m.group(1).upper(), "")
+                devices.append({"name": name, "hwid": hwid,
+                                "vendor_hint": vendor_hint})
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        _audit("WIFI_ENUM", f"WMI enum failed: {e}", "FAIL")
+    return devices
+
+
+def _find_wifi_adapter() -> str:
+    """Tên adapter WiFi đang hoạt động, hoặc '' nếu chưa có (WMI, không subprocess)."""
+    try:
+        import win32com.client
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            wmi = win32com.client.GetObject("winmgmts:\\\\.\\root\\cimv2")
+            query = ("SELECT Name, NetEnabled FROM Win32_NetworkAdapter "
+                     "WHERE PhysicalAdapter = TRUE")
+            for ad in wmi.ExecQuery(query):
+                name = ad.Name or ""
+                low = name.lower()
+                if any(k in low for k in ("wi-fi", "wifi", "wireless", "802.11", "wlan")):
+                    return name
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        _audit("WIFI_CHECK", f"WMI check failed: {e}", "FAIL")
+    return ""
+
+
+def fix_wifi_driver() -> str:
+    """Tự phát hiện + cài driver WiFi từ USB\\Drivers / C:\\SoftVN\\Drivers.
+
+    Luồng: check adapter đã có chưa → nếu chưa, pnputil /add-driver từng
+    thư mục driver tìm được → check lại → báo rõ HWID còn thiếu để kỹ thuật
+    viên biết cần tải driver hãng nào (T14 AMD = Qualcomm NFA725A...).
+    """
+    if not is_elevated():
+        return "[error] Cần quyền Administrator để cài driver."
+
+    _audit("WIFI_FIX", "start")
+    lines = []
+
+    # 1. Đã có WiFi chưa?
+    adapter = _find_wifi_adapter()
+    problems_before = _enum_problem_net_devices()
+    if adapter and not problems_before:
+        return f"[ok] WiFi đã hoạt động: {adapter}"
+    if adapter:
+        lines.append(f"[i] Đã thấy adapter: {adapter} (vẫn còn thiết bị lỗi driver)")
+
+    # 2. Tìm nguồn driver
+    dirs = _driver_source_dirs()
+    if not dirs:
+        _audit("WIFI_FIX", "no driver dirs found", "FAIL")
+        return ("[error] Không tìm thấy thư mục driver nào "
+                "(USB\\Drivers, C:\\SoftVN\\Drivers, C:\\Drivers). "
+                "Cắm USB cài đặt vào rồi chạy lại: fix wifi")
+
+    # 3. Cài driver từ từng nguồn
+    installed_any = False
+    for d in dirs:
+        _emit_progress(f"Đang quét driver: {d}")
+        code, out = _run_pnputil(
+            ["/add-driver", os.path.join(d, "*.inf"), "/subdirs", "/install"])
+        added = len(re.findall(r"(?i)(?:published name|tên đã xuất bản)", out))
+        if added:
+            installed_any = True
+            lines.append(f"[ok] {d}: nạp {added} driver package")
+        _audit("WIFI_FIX", f"pnputil {d} exit={code} added={added}")
+
+    # 4. Kiểm tra lại
+    time.sleep(3)  # chờ PnP bind driver
+    adapter = _find_wifi_adapter()
+    problems_after = _enum_problem_net_devices()
+
+    if adapter and not problems_after:
+        lines.append(f"[ok] WiFi đã hoạt động: {adapter}")
+        _audit("WIFI_FIX", f"success: {adapter}")
+    elif adapter:
+        lines.append(f"[ok] WiFi: {adapter}")
+    if problems_after:
+        lines.append("[!] Thiết bị mạng còn thiếu driver:")
+        for dev in problems_after:
+            hint = f" → {dev['vendor_hint']}" if dev["vendor_hint"] else ""
+            lines.append(f"    - {dev['name']} [{dev['hwid']}]{hint}")
+        lines.append("[i] Tải driver theo hãng ở trên, chép vào USB\\Drivers\\ "
+                     "rồi chạy lại: fix wifi")
+        _audit("WIFI_FIX", f"remaining={len(problems_after)}", "WARN")
+    elif not adapter:
+        if installed_any:
+            lines.append("[!] Đã nạp driver nhưng chưa thấy adapter WiFi — "
+                         "thử khởi động lại máy.")
+        else:
+            lines.append("[!] Không thấy adapter WiFi và không có thiết bị lỗi — "
+                         "máy này có thể không có card WiFi.")
+    return "\n".join(lines)

@@ -1,0 +1,40 @@
+name: Build WICA Portable
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller openai pyyaml pywin32 rarfile
+
+      - name: Build portable
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: python build_portable.py
+
+      - name: Find output folder
+        id: find
+        shell: bash
+        run: |
+          folder=$(ls -d dist/WICA-USB_* | head -1)
+          echo "folder=$folder" >> "$GITHUB_OUTPUT"
+          echo "Found: $folder"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WICA-Portable
+          path: ${{ steps.find.outputs.folder }}/WICA/
+          retention-days: 7

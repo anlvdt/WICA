@@ -102,6 +102,12 @@ CHECK_SKIP_PATTERNS = [
     r"skip\s+(?:ho[aạ]t [dđ][oộ]ng|hoat dong|check|ki[eể]m tra|kiem tra)",
 ]
 
+WIFI_FIX_PATTERNS = [
+    r"(?:fix|s[uử]a|sua|c[aà]i|cai)\s+(?:driver\s+)?wifi",
+    r"driver\s+wifi",
+    r"wifi\s+(?:driver|kh[oô]ng|khong|ko|m[aấ]t|mat|l[oỗ]i|loi)",
+]
+
 UPGRADE_PATTERNS = [
     r"^(?:c[aậ]p nh[aậ]t|cap nhat|upgrade|update)\s*(?:t[aấ]t c[aả]|tat ca|all|h[eế]t|het)?$",
 ]
@@ -200,6 +206,11 @@ def parse_fast(text: str, quick_commands: dict = None) -> list[dict] | None:
     for p in CHECK_SKIP_PATTERNS:
         if re.search(p, text_lower):
             return [{"type": "check_skip_profile", "name": "mac_dinh"}]
+
+    # Fix WiFi driver (T14 Intel/AMD...) — chạy offline, không cần LLM
+    for p in WIFI_FIX_PATTERNS:
+        if re.search(p, text_lower):
+            return [{"type": "fix_wifi"}]
 
     # CLI command - detect khi input bắt đầu bằng lệnh whitelist
     first_word = text_lower.split()[0].replace(".exe", "") if text_lower.split() else ""

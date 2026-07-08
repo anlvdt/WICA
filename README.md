@@ -37,6 +37,25 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### CLI (zero-touch deploy)
+```bash
+WICA.exe --run-profile mac_dinh   # mở GUI và tự chạy profile ngay
+WICA.exe --cmd "cài chrome"       # mở GUI và tự chạy 1 lệnh bất kỳ
+```
+Dùng bởi `PostSetup.cmd` trên USB cài Windows tự động — không cần gõ lệnh trong chat.
+
+### Fix WiFi driver (ThinkPad T14 và tương tự)
+Gõ `fix wifi` (fast command, không cần LLM) hoặc là bước 0 của profile `mac_dinh`:
+- Dò card WiFi/thiết bị mạng thiếu driver qua WMI (EDR-safe, không PowerShell)
+- Tự cài driver khớp từ `USB\Drivers`, `C:\SoftVN\Drivers`, `C:\Drivers` bằng `pnputil`
+- Nếu còn thiếu: in hardware ID + đoán hãng (VEN_8086 Intel / 17CB Qualcomm /
+  10EC Realtek / 14C3 MediaTek) để biết cần tải driver nào
+- T14 Intel (AX201/AX211) dùng bộ IntelWiFi có sẵn; T14 AMD Gen 3/4 cần thêm
+  Qualcomm NFA725A (Lenovo DS556215) vào `Drivers\QualcommWiFi\`
+
+Lưu ý: `config.yaml` cạnh `WICA.exe` được ưu tiên hơn bản bundle trong `_internal`
+(sửa config không cần build lại).
+
 ## Đóng gói USB
 ```bash
 python build_portable.py

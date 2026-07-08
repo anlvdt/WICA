@@ -92,14 +92,15 @@ def build():
         os.remove(spec_file)
 
     # PyInstaller FOLDER mode (EDR-safe, KHONG --onefile, KHONG UPX)
+    sep = os.pathsep
     subprocess.run([
         "pyinstaller",
         "--noconfirm",
         "--noupx",           # EDR-safe: UPX-packed binaries bi CrowdStrike flag
         "--name", APP_NAME,
         "--icon", "app_icon.ico",
-        "--add-data", "config.yaml;.",
-        "--add-data", "app_icon.ico;.",
+        "--add-data", f"config.yaml{sep}.",
+        "--add-data", f"app_icon.ico{sep}.",
         "--hidden-import", "yaml",
         "--hidden-import", "openai",
         "--hidden-import", "win32com.client",

@@ -16,12 +16,22 @@ from tools import (SoftwareManager, SystemConfigurator, REGISTRY_CONFIGS, _audit
                    set_progress_callback, _run_cli_command, copy_to_all_users,
                    install_fonts, _is_winget_installed, _is_registry_set,
                    _is_deployed, _are_fonts_installed, _is_copied_to_users,
-                   _get_installed_list_cached, clean_start_menu, _is_start_menu_clean)
+                   _get_installed_list_cached, clean_start_menu, _is_start_menu_clean,
+                   fix_wifi_driver)
 from fast_commands import parse_fast
 from privilege import is_elevated
 from keystore import get_key
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+def _find_config() -> str:
+    """Ưu tiên config.yaml cạnh WICA.exe (user sửa được), fallback bản bundle."""
+    if getattr(sys, "frozen", False):
+        exe_cfg = os.path.join(os.path.dirname(sys.executable), "config.yaml")
+        if os.path.exists(exe_cfg):
+            return exe_cfg
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+
+
+CONFIG_PATH = _find_config()
 MAX_HISTORY = 20
 
 SYSTEM_PROMPT = """Bạn là WICA — Windows Install & Config Agent. Bạn là agent HÀNH ĐỘNG, không phải chatbot tư vấn.
@@ -65,6 +75,7 @@ Khi hoàn thành hoặc không cần thêm actions:
 {{ "type": "install_fonts", "source": "thư_mục" }}
 {{ "type": "remove_bloatware" }}
 {{ "type": "clean_start_menu" }}
+{{ "type": "fix_wifi" }}  ← tự dò card WiFi thiếu driver (T14 Intel/AMD...), cài từ USB\\Drivers / C:\\SoftVN\\Drivers, báo HWID nếu thiếu
 {{ "type": "run_profile", "name": "mac_dinh" }}
 {{ "type": "cli", "command": "lệnh" }}
 
@@ -1076,6 +1087,8 @@ class AntiGravityAgent:
             return self._remove_bloatware()
         elif t == "clean_start_menu":
             return clean_start_menu()
+        elif t == "fix_wifi":
+            return fix_wifi_driver()
         elif t == "list_profiles":
             return self._list_profiles()
         elif t == "run_profile":

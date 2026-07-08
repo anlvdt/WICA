@@ -43,3 +43,9 @@ coll = COLLECT(
     upx_exclude=[],
     name='WICA',
 )
+app = BUNDLE(
+    coll,
+    name='WICA.app',
+    icon='app_icon.ico',
+    bundle_identifier=None,
+)
