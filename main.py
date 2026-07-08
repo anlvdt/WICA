@@ -13,6 +13,8 @@ from tools import _cancel_winget
 from privilege import is_elevated, get_run_context, current_username
 from shared_constants import no_accent as _no_accent
 
+_SINGLE_INSTANCE_MUTEX = None
+
 # --- Spinner frames cho loading animation ---
 SPINNER = ["●  ○  ○", "○  ●  ○", "○  ○  ●", "○  ●  ○"]
 
@@ -1710,7 +1712,31 @@ class ChatApp:
 
     def run(self): self.root.mainloop()
 
+def _acquire_single_instance_guard() -> bool:
+    """Prevent launching a second WICA process on Windows."""
+    global _SINGLE_INSTANCE_MUTEX
+    if os.name != "nt":
+        return True
+    try:
+        mutex_name = "Global\\WICA_SingleInstance_Mutex"
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+        if not handle:
+            return True
+        _SINGLE_INSTANCE_MUTEX = handle
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            msg = "WICA is already running. Please use the existing window."
+            try:
+                ctypes.windll.user32.MessageBoxW(None, msg, "WICA", 0x30)
+            except Exception:
+                print(msg)
+            return False
+    except Exception:
+        return True
+    return True
+
 def main():
+    if not _acquire_single_instance_guard():
+        return
     # CLI: WICA.exe --run-profile mac_dinh  |  WICA.exe --cmd "cài chrome"
     auto_cmd = None
     args = sys.argv[1:]
